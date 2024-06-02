@@ -1,0 +1,67 @@
+use std::ports::new_mut_wire;
+use std::ports::read_mut_wire;
+
+use std::conv::unsafe::bool_to_clock;
+
+#[no_mangle]
+entity IDDRX1F(
+    #[no_mangle] D: bool,
+    #[no_mangle] SCLK: clock,
+    #[no_mangle] RST: bool,
+    #[no_mangle] Q0: &mut bool,
+    #[no_mangle] Q1: &mut bool
+) __builtin__
+
+entity iddrx1f(sclk: clock, rst: bool, d: bool) -> uint<2> {
+    let Q0 = inst new_mut_wire();
+    let Q1 = inst new_mut_wire();
+    let _ = inst IDDRX1F$(D: d, SCLK: sclk, RST: rst, Q0, Q1);
+
+    let one: uint<1> = 1;
+    (if inst read_mut_wire(Q1) {one} else {0}) `concat` (if inst read_mut_wire(Q0) {one} else {0})
+}
+
+
+#[no_mangle]
+entity ODDRX1F(
+    #[no_mangle] SCLK: clock,
+    #[no_mangle] RST: bool,
+    #[no_mangle] D0: bool,
+    #[no_mangle] D1: bool,
+    #[no_mangle] Q: &mut bool,
+) __builtin__
+
+entity oddrx1f(
+    sclk: clock,
+    rst: bool,
+    // unpacked into {D1, D0}
+    d: uint<2>,
+) -> bool {
+    let o = inst new_mut_wire();
+
+    let _ = inst ODDRX1F$(
+        D0: (d & 1) == 1,
+        D1: ((d >> 1) & 1) == 1,
+        SCLK: sclk,
+        RST: rst,
+        Q: o
+    );
+    inst read_mut_wire(o)
+}
+
+
+// NOTE: We need to explicitly not set the `B` port in this module, but we can't do that
+// as is in Spade. This wrapper takes care of that
+#[no_mangle]
+entity BBPU(
+    #[no_mangle] I: bool,
+    #[no_mangle] T: bool,
+    #[no_mangle] O: &mut bool,
+    #[no_mangle] B: inout<bool>
+) __builtin__
+
+entity bbpu(I: bool, T: bool, #[no_mangle] B: inout<bool>) -> bool {
+    let O = inst new_mut_wire();
+    let _ = inst BBPU$(I, T, O, B);
+    inst read_mut_wire(O)
+}

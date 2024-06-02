@@ -1,0 +1,34 @@
+name = "hwtest"
+
+[compiler]
+git = "https://gitlab.com/spade-lang/spade/"
+branch = "uint"
+
+[plugins.sdram]
+path="../"
+
+[libraries]
+ulx3s_sdram = {path = "../"}
+ecp5stubs = {path = "deps/ecp5stubs"}
+
+[synthesis]
+command = "synth_ecp5"
+top = "main"
+extra_verilog = [
+    "build/litedram/gateware/sdram_controller_impl.v",
+    "src/pll.sv",
+    "/home/frans/build/litex/pythondata-cpu-vexriscv/pythondata_cpu_vexriscv/verilog/VexRiscv.v",
+    "src/launder_clock.v"
+]
+
+[pnr]
+architecture = "ecp5"
+device = "LFE5U-85F"
+pin_file = "ulx3s_v20.lpf"
+package = "CABGA381"
+
+[upload]
+tool = "fujprog"
+
+[packing]
+tool = "ecppack"

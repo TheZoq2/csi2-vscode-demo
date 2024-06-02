@@ -1,0 +1,12 @@
+struct MergedStream {
+    s: Option<(uint<8>, uint<8>)>
+}
+
+fn lane_merger(lanes: (Option<uint<8>>, Option<uint<8>>)) -> MergedStream {
+    match lanes {
+        (Some(l0), Some(l1)) => MergedStream(Some((l0, l1))),
+        // This can occur at the end of a stream, we won't do further checking here
+        (Some(l0), None) => MergedStream(Some((l0, 0))),
+        (_, _) => MergedStream(None())
+    }
+}

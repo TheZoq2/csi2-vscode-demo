@@ -1,0 +1,199 @@
+use std::ports::read_mut_wire;
+use std::ports::new_mut_wire;
+use std::conv::uint_to_int;
+use std::conv::int_to_uint;
+
+use std::cdc::handshake;
+use std::mem::dp_bram;
+
+use ulx3s_sdram::avalon::AvalonPort;
+
+struct LineCacheCommand {
+    y: uint<15>,
+    width: uint<15>
+}
+
+
+pipeline(1) line_cache_writer(
+    dram_clk: clock,
+    rst: bool,
+    avalon: AvalonPort,
+    bram: std::mem::WritePort<10, uint<16>>,
+
+    vga_clk: clock,
+    command_vga: Option<LineCacheCommand>,
+)  {
+        let command = inst handshake(vga_clk, rst, command_vga, dram_clk);
+        let read_cmd_ready = inst new_mut_wire();
+
+        reg(dram_clk) commands_left: Option<(uint<24>, int<15>)> reset (rst: None()) = {
+            match (commands_left, command) {
+                // We assume no overruns here
+                (_, Some(LineCacheCommand$(y, width))) => {
+                    let addr: uint<30> = y * width;
+                    Some((trunc(addr), uint_to_int(width)))
+                },
+                (Some((addr, width)), None) => {
+                    if inst read_mut_wire(read_cmd_ready) {
+                        let remaining = width - 127;
+
+                        if remaining <= 0 {
+                            None()
+                        }
+                        else {
+                            Some((trunc(addr + 127), trunc(remaining)))
+                        }
+                    } else {
+                        commands_left
+                    }
+                },
+                (None, None) => None()
+            }
+        };
+
+        let avalon_read_port = ulx3s_sdram::avalon::ReadAddrPort$(
+            addr_count: &match commands_left {
+                Some((addr, remaining)) => {
+                    let count = if remaining > 127 {127} else {remaining};
+                    Some((addr, int_to_uint(trunc(count))))
+                },
+                None => None()
+            },
+            ready: read_cmd_ready
+        );
+
+        let out = avalon.inst burst_reader(dram_clk, rst, avalon_read_port);
+    reg;
+        reg(dram_clk) bram_addr reset(rst: 0) = match (command, out) {
+            (Some(_), _) => 0,
+            (None, Some(_)) => trunc(bram_addr + 1),
+            _ => bram_addr
+        };
+
+        set bram.addr = bram_addr;
+        set bram.write = out;
+}
+
+struct port LineCacheReadPort {
+    addr: &mut uint<10>,
+    out: &uint<16>,
+}
+
+pipeline(1) read_line_cache(vga_clk: clock, p: LineCacheReadPort, addr: uint<10>) -> uint<16> {
+        set p.addr = addr;
+    reg;
+        *p.out
+}
+
+entity line_cache(
+    vga_clk: clock,
+    rst: bool,
+    line: Option<LineCacheCommand>,
+
+    dram_clk: clock,
+
+    avalons: (AvalonPort, AvalonPort)
+) -> LineCacheReadPort {
+    // If we get a new write command, switch which memory we write to
+    reg(vga_clk) write_mem reset(rst: false) = match line {
+        Some(_) => !write_mem,
+        None => write_mem
+    };
+
+    let (mem_w_0, mem_r_0) = inst dp_bram::<10, uint<16>, 1024>$(read_clk: vga_clk, write_clk: dram_clk);
+    let (mem_w_1, mem_r_1) = inst dp_bram::<10, uint<16>, 1024>$(read_clk: vga_clk, write_clk: dram_clk);
+
+    let _ = inst(1) line_cache_writer(
+        dram_clk,
+        rst,
+        avalons#0,
+        mem_w_0,
+
+        vga_clk,
+        if !write_mem {line} else {None()},
+    );
+    let _ = inst(1) line_cache_writer(
+        dram_clk,
+        rst,
+        avalons#1,
+        mem_w_1,
+
+        vga_clk,
+        if write_mem {line} else {None()},
+    );
+
+    let read_addr = inst new_mut_wire();
+
+    set mem_r_0.addr = inst read_mut_wire(read_addr);
+    set mem_r_1.addr = inst read_mut_wire(read_addr);
+
+    let read_out = if write_mem {
+        mem_r_0.out
+    } else {
+        mem_r_1.out
+    };
+
+    LineCacheReadPort$(
+        addr: read_addr,
+        out: read_out
+    )
+}
+
+
+entity line_cache_test_harness(
+    vga_clk: clock,
+    rst: bool,
+    line: Option<LineCacheCommand>,
+
+    dram_clk: clock,
+
+    #[no_mangle] av0_address: &mut uint<24>,
+    #[no_mangle] av0_burstcount: &mut uint<8>,
+    #[no_mangle] av0_byteenable: &mut uint<2>,
+    #[no_mangle] av0_read: &mut bool,
+    #[no_mangle] av0_readdata: &uint<16>,
+    #[no_mangle] av0_readdatavalid: &bool,
+    #[no_mangle] av0_waitrequest: &bool,
+    #[no_mangle] av0_write: &mut bool,
+    #[no_mangle] av0_writedata: &mut uint<16>,
+
+
+    #[no_mangle] av1_address: &mut uint<24>,
+    #[no_mangle] av1_burstcount: &mut uint<8>,
+    #[no_mangle] av1_byteenable: &mut uint<2>,
+    #[no_mangle] av1_read: &mut bool,
+    #[no_mangle] av1_readdata: &uint<16>,
+    #[no_mangle] av1_readdatavalid: &bool,
+    #[no_mangle] av1_waitrequest: &bool,
+    #[no_mangle] av1_write: &mut bool,
+    #[no_mangle] av1_writedata: &mut uint<16>,
+
+    read_addr: uint<10>,
+) -> uint<16> {
+    let av0 = AvalonPort $(
+        address: av0_address,
+        burstcount: av0_burstcount,
+        byteenable: av0_byteenable,
+        read: av0_read,
+        readdata: av0_readdata,
+        readdatavalid: av0_readdatavalid,
+        waitrequest: av0_waitrequest,
+        write: av0_write,
+        writedata: av0_writedata,
+    );
+    let av1 = AvalonPort $(
+        address: av1_address,
+        burstcount: av1_burstcount,
+        byteenable: av1_byteenable,
+        read: av1_read,
+        readdata: av1_readdata,
+        readdatavalid: av1_readdatavalid,
+        waitrequest: av1_waitrequest,
+        write: av1_write,
+        writedata: av1_writedata,
+    );
+
+    let read_port = inst line_cache(vga_clk, rst, line, dram_clk, (av0, av1));
+    set read_port.addr = read_addr;
+    *read_port.out
+}

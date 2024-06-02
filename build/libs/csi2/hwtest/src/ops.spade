@@ -1,0 +1,8 @@
+// NOTE: Move this into stdlib if it ends up being helpful
+fn wrapping_increment<#N>(x: uint<N>, top: uint<N>) -> uint<N> {
+    if x == top {
+        0
+    } else {
+        trunc(x + 1)
+    }
+}

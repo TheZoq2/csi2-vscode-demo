@@ -1,0 +1,5 @@
+`verilator_config
+lint_off -rule TIMESCALEMOD
+lint_off -file "build/litedram/gateware/sdram_controller_impl.v"
+lint_off -file "deps/ulx3s_hdmi_spade/src/example_verilog/tmds_encoder.v"
+lint_off -file "build/litex/pythondata-cpu-vexriscv/pythondata_cpu_vexriscv/verilog/VexRiscv.v"

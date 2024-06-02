@@ -1,0 +1,339 @@
+use std::mem::ReadPort;
+use std::mem::read_read_port;
+use std::mem::WritePort;
+use std::mem::dp_bram;
+use std::cdc::handshake;
+use std::ports::new_mut_wire;
+use std::ports::read_mut_wire;
+
+use ulx3s_sdram::avalon::AvalonPort;
+use ulx3s_sdram::avalon::CtrlSignals;
+use ulx3s_sdram::avalon::ctrl_unused;
+
+/*
+    Blocks are stored as follows where `Bx` is the number of blocks per line
+
+                                                    Local cache
+    0     1     2            Bx-1         x-->      vvvvvvvvvvv
+    +-----+-----+-----+      +-----+   y +---------------------------- ... --+
+    |     |     |     |      |     |   | |                                   |
+    |     |     |     |  ... |     |   v |                                   |
+    +-----+-----+-----+      +-----+     +---------------------------- ... --+
+    Bx    Bx+1  Bx+2         Bx*2-1
+    +-----+-----+-----+      +-----+
+    |     |     |     |      |     |
+    |     |     |     |  ... |     |
+    +-----+-----+-----+      +-----+
+
+    ^^^ All indices * block_size = 128
+
+
+
+    Blocks internally are laid out as
+
+      0 .. 8
+
+   0  +----+
+   .  |    |
+   .  |    |
+   8  +----+
+*/
+
+fn cache_size<#NumXBlocks>() -> uint<16> {
+    NumXBlocks * trunc::<uint<7>, uint<7>>(64)
+}
+
+fn x_width<#NumXBlocks>() -> uint<16> {
+    NumXBlocks * trunc::<uint<7>, uint<7>>(8)
+}
+
+struct port ToWriter {
+    swap_buffers: &bool,
+    // Works around a compiler bug when using `port`
+    _dummy: &mut bool,
+}
+
+entity bram_cache<#NumXBlocks>(
+    camera_clk: clock,
+    rst: bool,
+    is_frame_start: bool,
+    write: Option<uint<16>>,
+    write_port0: WritePort<14, uint<16>>,
+    write_port1: WritePort<14, uint<16>>,
+    to_writer_inv: ~ToWriter,
+) {
+    let cache_size_ = cache_size::<NumXBlocks>() - 1;
+    let cache_size: uint<14> = trunc(cache_size_);
+    let should_write = match write {
+        Some(_) => true,
+        None => false,
+    };
+    reg(camera_clk) num_written reset(rst: 0) = {
+        if is_frame_start {
+            0
+        } else {
+            if should_write {
+                if num_written >= cache_size {
+                    0
+                } else {
+                    trunc(num_written + 1)
+                }
+            } else {
+                num_written
+            }
+        }
+    };
+
+    let full_trigger_swap = (num_written >= cache_size && should_write);
+    let swap = is_frame_start || full_trigger_swap;
+    set to_writer_inv.swap_buffers = full_trigger_swap;
+
+    reg(camera_clk) curr_buffer: uint<1> reset(rst: 0) = if swap {~curr_buffer} else {curr_buffer};
+
+    let write0 = if curr_buffer == 0 {write} else {None};
+    let write1 = if curr_buffer == 1 {write} else {None};
+    set write_port0.addr = num_written;
+    set write_port0.write = write0;
+    set write_port1.addr = num_written;
+    set write_port1.write = write1;
+}
+
+enum WriterState {
+    Idle{buffer: uint<1>, blocky: uint<18>},
+    WriteBlock{
+        buffer: uint<1>,
+        nextblocky: uint<18>,
+        blockx: uint<24>,
+        blocky: uint<18>,
+        x: uint<4>,
+        y: uint<4>
+    },
+}
+
+struct DramWriterDebug {
+    swap_overrun: bool,
+}
+
+entity dram_writer<#NumXBlocks>(
+    dram_clk: clock,
+    rst: bool,
+    read_port0: ReadPort<14, uint<16>>,
+    read_port1: ReadPort<14, uint<16>>,
+    avalon: AvalonPort,
+    to_writer: ToWriter,
+    dbg: &mut DramWriterDebug,
+    is_frame_start_sys: bool,
+    camera_clk: clock,
+) {
+    set to_writer._dummy = false;
+
+    // Synchronization stuff
+    let is_frame_start_dram = match inst handshake(
+        camera_clk,
+        rst,
+        if is_frame_start_sys {Some(true)} else {None},
+        dram_clk,
+    ) {
+        Some(_) => true,
+        _ => false,
+    };
+    let swap_buffers = match inst handshake(
+        camera_clk,
+        rst,
+        if *to_writer.swap_buffers {Some(true)} else {None},
+        dram_clk,
+    ) {
+        Some(_) => true,
+        _ => false,
+    };
+
+    decl state;
+    let next_state = match state {
+        WriterState::Idle$(buffer, blocky) =>
+            // If the buffer is full, dump the content
+            if swap_buffers {
+                let nextblocky = trunc(blocky + 1);
+                WriterState::WriteBlock$(buffer: ~buffer, nextblocky, blocky, blockx: 0, x: 0, y: 0)
+            // Likewise if we are starting a new frame. Note that this mechanism relies on the
+            // buffer being emptied by the time the next frame starts.
+            } else if is_frame_start_dram {
+                let nextblocky = 0;
+                WriterState::WriteBlock$(buffer: ~buffer, nextblocky, blocky, blockx: 0, x: 0, y: 0)
+            } else {
+                state
+            },
+        WriterState::WriteBlock$(buffer, blockx, blocky, nextblocky, x, y) => {
+            if *avalon.waitrequest {
+                state
+            } else {
+                if x == 7 && y == 7 {
+                    if blockx + 1 == NumXBlocks {
+                        WriterState::Idle$(buffer: buffer, blocky: nextblocky)
+                    } else {
+                        WriterState::WriteBlock$(
+                            buffer,
+                            blockx: trunc(blockx+1),
+                            blocky,
+                            nextblocky,
+                            x: 0,
+                            y: 0
+                        )
+                    }
+                } else if x == 7 {
+                    WriterState::WriteBlock$(
+                        buffer,
+                        blockx,
+                        blocky,
+                        nextblocky,
+                        x: 0,
+                        y: trunc(y+1)
+                    )
+                } else {
+                    WriterState::WriteBlock$(
+                        buffer,
+                        blockx,
+                        blocky,
+                        nextblocky,
+                        x: trunc(x+1),
+                        y: y
+                    )
+                }
+            }
+        },
+    };
+
+
+    reg(dram_clk) state reset (rst: WriterState::Idle$(buffer: 1, blocky: 0)) = {
+        next_state
+    };
+
+
+    let buffer = match state {
+        WriterState::Idle$(buffer, blocky: _) => buffer,
+        WriterState::WriteBlock$(buffer, blockx: _, blocky: _, nextblocky: _, x: _, y: _) => buffer,
+    };
+    let write_addr = match state {
+        WriterState::Idle$(buffer, blocky) => 0,
+        WriterState::WriteBlock$(buffer: _, blockx, blocky, nextblocky: _, x, y) => {
+            // Gah, the indexing here is so bad :(
+            let blocky_idx: uint<27> = blocky * NumXBlocks;
+            let block_idx: uint<28> = zext(blockx) + blocky_idx;
+            let block_start: uint<35> = block_idx * 64;
+
+            let y_inner_idx: uint<32> = y * 8;
+            let inner = zext(x) + y_inner_idx;
+
+            trunc(block_start + zext(inner))
+        },
+    };
+
+    let read_addr = match next_state {
+        WriterState::Idle$(buffer, blocky) => 0,
+        WriterState::WriteBlock$(buffer: _, blockx, blocky, nextblocky: _, x, y) => {
+            let block_x_offset: uint<30> = blockx * 8;
+            let full_x: uint<31> = block_x_offset + zext(x);
+            let y_major  = y * x_width::<NumXBlocks>();
+            trunc(trunc(full_x) + y_major)
+        }
+    };
+
+    set read_port0.addr = read_addr;
+    set read_port1.addr = read_addr;
+
+    let out = if buffer == 0 {read_port0.out} else {read_port1.out};
+
+    let avalon_control = CtrlSignals$(
+        address: write_addr,
+        burstcount: 64,
+        byteenable: 0b11,
+        read: false,
+        write: match state {
+            WriterState::Idle(_, _) => false,
+            WriterState::WriteBlock$(buffer, blockx, blocky, nextblocky: _, x, y) => true,
+        },
+        writedata: *out
+    );
+    let _ = avalon.inst with_control_signals(avalon_control);
+
+    let swap_overrun = match (state, swap_buffers) {
+        (WriterState::WriteBlock(_, _, _, _, _, _), true) => true,
+        _ => false
+    };
+
+    set dbg = DramWriterDebug$(swap_overrun);
+}
+
+entity block_cache<#NumXBlocks>(
+    camera_clk: clock,
+    rst: bool,
+    is_frame_start: bool,
+    write: Option<uint<16>>,
+    dram_clk: clock,
+    avalon: AvalonPort,
+
+    dbg: &mut DramWriterDebug,
+) {
+    // 8 * 250 * 8
+    let (write_port0, read_port0) = inst dp_bram::<14, uint<16>, 16384>$(write_clk: camera_clk, read_clk: dram_clk);
+    let (write_port1, read_port1) = inst dp_bram::<14, uint<16>, 16384>$(write_clk: camera_clk, read_clk: dram_clk);
+
+    let (to_writer, to_writer_inv) = port;
+
+
+    let _ = inst bram_cache::<NumXBlocks>$(camera_clk, rst, is_frame_start, write, write_port0, write_port1, to_writer_inv);
+    let _ = inst dram_writer::<64>$(
+        dram_clk,
+        rst,
+        read_port0,
+        read_port1,
+        avalon,
+        to_writer,
+        dbg,
+        is_frame_start_sys: is_frame_start,
+        camera_clk
+    );
+}
+
+
+struct THOut {
+    address: uint<24>,
+    burstcount: uint<8>,
+    byteenable: uint<2>,
+    avalon_write: bool,
+    writedata: uint<16>,
+}
+
+#[no_mangle]
+entity block_cache_th(
+    camera_clk: clock,
+    rst: bool,
+    is_frame_start: bool,
+    write: Option<uint<16>>,
+    dram_clk: clock,
+) -> THOut {
+    let address = inst new_mut_wire();
+    let burstcount = inst new_mut_wire();
+    let byteenable = inst new_mut_wire();
+    let writedata = inst new_mut_wire();
+    let avalon_write = inst new_mut_wire();
+    let avalon = AvalonPort$(
+        address: address,
+        burstcount: burstcount,
+        byteenable: byteenable,
+        read: inst new_mut_wire(),
+        readdata: &0,
+        readdatavalid: &false,
+        waitrequest: &false,
+        write: avalon_write,
+        writedata: writedata,
+    );
+    let _ = inst block_cache$(camera_clk, rst, is_frame_start, write, dram_clk, avalon, dbg: inst new_mut_wire());
+
+    THOut$(
+        address: inst read_mut_wire(address),
+        burstcount: inst read_mut_wire(burstcount),
+        byteenable: inst read_mut_wire(byteenable),
+        avalon_write: inst read_mut_wire(avalon_write),
+        writedata: inst read_mut_wire(writedata),
+    )
+}

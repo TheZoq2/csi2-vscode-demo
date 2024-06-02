@@ -1,0 +1,243 @@
+use std::ports::read_mut_wire;
+use std::ports::new_mut_wire;
+
+use protocols::uart::UartConfig;
+
+use ulx3s_sdram::main::SdramPins;
+use ulx3s_sdram::main::SdramStatus;
+use ulx3s_sdram::main::Uart;
+use ulx3s_sdram::avalon::AvalonPort;
+
+use hdmi::plls::pll_640_480_60;
+// use hdmi::plls::pll_1024_600_60 as hdmi_pll;
+// use hdmi::plls::pll_480_800_60 as hdmi_pll;
+use hdmi::plls::pll_480_800_60 as hdmi_pll;
+use hdmi::plls::Clocks;
+
+use ecp5stubs::ecp5stubs::bbpu;
+use ecp5stubs::ecp5stubs::iddrx1f;
+
+use csi2::lib::csi2_frontend;
+use csi2::lib::FrontendOut;
+use csi2::iserdes::iserdes;
+use csi2::header_decoding::PixelStream;
+use csi2::long_packet_streamer::long_packet_streamer;
+use csi2::short_packet::ShortPacketStream;
+use csi2::alignment::lane_aligner;
+use csi2::uart_config::uart_configurator;
+
+use lib::write_cache::write_cache;
+use lib::block_cache::block_cache;
+use lib::hdmi::hdmi_out;
+use lib::pixel_ram::PixelRamW;
+use lib::pixel_ram::pixel_ram;
+use lib::generated::sdram_controller::sdram_controller;
+
+// This feels unsafe, but gatecat does it
+entity clock_divider(clk: clock, clken: bool) -> clock {
+    reg(clk) count: int<2> initial (0) = if clken {trunc(count + 1)} else {count};
+    inst std::conv::unsafe::bool_to_clock(count >> 1 == 1)
+}
+
+entity dphy_frontend(dphy_clk: clock, rst: bool, dphy_data: [bool; 2]) -> [uint<8>; 2] {
+    let lane_data = [
+        inst iddrx1f(dphy_clk, rst, dphy_data[0]),
+        inst iddrx1f(dphy_clk, rst, dphy_data[1])
+    ];
+
+    [
+        inst iserdes$(dphy_clk, din: lane_data[0]),
+        inst iserdes$(dphy_clk, din: lane_data[1]),
+    ]
+}
+
+// The dphy_lp signal is dirty leading to premature dealignment. Since we're only using
+// it as a hint, we'll clean it up a bit by requirin the last 4 samples to be 1 for it to be 1
+entity lp_cleaner(dphy_clk: clock, dphy_lp: bool) -> bool {
+    let dphy_lp = inst std::cdc::sync2_bool(dphy_clk, dphy_lp);
+    reg(dphy_clk) dphy_lp_sreg: uint<3> = (dphy_lp_sreg << 1) | if dphy_lp {1} else {0};
+    dphy_lp_sreg == 0b111
+}
+
+
+
+#[no_mangle]
+entity main(
+    #[no_mangle] BTN_N: bool, 
+    #[no_mangle] btn_fire1_unsync: bool,
+
+    #[no_mangle] dphy_clk_in: clock,
+    // #[no_mangle] dphy_clk_lp: bool,
+    #[no_mangle] dphy_data: [bool; 2],
+    #[no_mangle] dphy_lp: bool,
+    #[no_mangle] cam_enable: &mut bool,
+
+    #[no_mangle] gpdi_dp: &mut [bool; 4],
+
+    #[no_mangle] debug_pins: &mut [bool; 8],
+
+    #[no_mangle] i2c_sclk: &mut bool,
+    #[no_mangle] i2c_sda: inout<bool>,
+
+    #[no_mangle] dphy_clk_lp: bool,
+
+    uart: Uart,
+
+    sdram_a: &mut int<13>,
+    sdram_ba: &mut int<2>,
+    sdram_ras_n: &mut bool,
+    sdram_cas_n: &mut bool,
+    sdram_we_n: &mut bool,
+    sdram_cs_n: &mut bool,
+    sdram_dm: &mut int<2>,
+    sdram_dq: &int<16>,
+    sdram_cke: &mut bool,
+    sdram_clock: &mut bool,
+
+    #[no_mangle] clk_25mhz: clock,
+) {
+    // reg(clk_25mhz) rst_cnt: uint<8> initial (100) = if rst_cnt != 0 {trunc(rst_cnt - 1)} else {0};
+    // let rst = rst_cnt != 0;
+    reg(dphy_clk_in) rst = !BTN_N;
+
+    set cam_enable = true;
+
+    let dphy_clk = dphy_clk_in;
+    let sys_clk = inst clock_divider$(clk: dphy_clk, clken: true);
+    let unaligned_bytes = inst dphy_frontend$(dphy_clk, rst, dphy_data);
+    let dphy_lp = inst lp_cleaner(dphy_clk, dphy_lp);
+
+    let Clocks$(clk_pixel: vga_clk, clk_shift) = inst hdmi_pll(clk_25mhz);
+
+
+    let lib::dram_pll::SdramClocks$(clk_50e6, clk_50e6_180deg) =
+            inst lib::dram_pll::dram_pll$(clk25: clk_25mhz, rst);
+    let dram_clk = clk_50e6;
+
+    let (hdmi_avalon0, hdmi_avalon1, hdmi_avalon2, hdmi_avalon3, cam_avalon0, status) = inst sdram_controller$(
+        clk_50e6: clk_50e6,
+        clk_50e6_180deg: clk_50e6_180deg,
+        rst,
+        uart,
+        pins: SdramPins$(
+            sdram_a,
+            sdram_ba,
+            sdram_ras_n,
+            sdram_cas_n,
+            sdram_we_n,
+            sdram_cs_n,
+            sdram_dm,
+            sdram_dq,
+            sdram_cke,
+            sdram_clock
+        )
+    );
+
+    let uart_command = inst uart_configurator$(
+        clk: clk_25mhz,
+        rst,
+        rx: *uart.rx,
+        uart_config: UartConfig$(bit_time: 217, parity: false, stop_bits: 1)
+    );
+
+    let hdmi_dbg = inst new_mut_wire();
+    let _ = inst(8) hdmi_out$(
+        vga_clk,
+        clk_shift,
+        rst,
+        gpdi_dp,
+        command: inst std::cdc::handshake(clk_25mhz, rst, uart_command, vga_clk),
+        dbg: hdmi_dbg,
+        dram_clk,
+        avalons: (hdmi_avalon0, hdmi_avalon1, hdmi_avalon2)
+    );
+    let _ = hdmi_avalon3.inst unused();
+
+    let sda_drive_low = inst new_mut_wire();
+
+    let sda_in = inst bbpu$(I: !inst read_mut_wire(sda_drive_low), T: !inst read_mut_wire(sda_drive_low), B: i2c_sda);
+
+    let _ = inst csi2::camera_config::configurator::<65>$(
+        clk: clk_25mhz,
+        rst,
+        // sda: i2c_sda,
+        sda_drive_low,
+        sclk: i2c_sclk,
+        sda_in,
+        i2c_config: protocols::i2c::I2CConfig$(clk_period: 250),
+        reinit_unsync: btn_fire1_unsync,
+        command: uart_command,
+    );
+
+    let frontend_dbg = inst new_mut_wire();
+
+    let _ =inst(7) sysclk_frontend$(
+        sys_clk,
+        rst,
+        dphy_lp,
+        unaligned_bytes,
+
+        dram_clk,
+        avalon: cam_avalon0,
+
+        dbg: frontend_dbg,
+    );
+
+    set debug_pins = [
+        (*hdmi_avalon0.waitrequest) && inst read_mut_wire(hdmi_avalon0.read),
+        (*hdmi_avalon1.waitrequest) && inst read_mut_wire(hdmi_avalon1.read),
+        (*hdmi_avalon2.waitrequest) && inst read_mut_wire(hdmi_avalon2.read),
+        (*hdmi_avalon3.waitrequest) && inst read_mut_wire(hdmi_avalon3.read),
+        (*cam_avalon0.waitrequest) && inst read_mut_wire(cam_avalon0.write),
+        dphy_lp,
+        std::conv::uint_to_bits(inst read_mut_wire(hdmi_dbg).cache.top_cache)[0],
+        std::conv::uint_to_bits(inst read_mut_wire(hdmi_dbg).cache.top_cache)[1],
+    ];
+
+}
+
+
+pipeline(7) sysclk_frontend(
+    sys_clk: clock,
+    rst: bool,
+    dphy_lp: bool,
+    unaligned_bytes: [uint<8>; 2],
+
+    dram_clk: clock,
+    avalon: AvalonPort,
+
+    dbg: &mut lib::block_cache::DramWriterDebug,
+) {
+        let FrontendOut$(short_packets, pixels) = inst(7) csi2_frontend$(sys_clk, rst, dphy_lp, unaligned_bytes, dbg: inst new_mut_wire());
+    reg*7;
+        // let cache_dbg = inst new_mut_wire();
+
+        let _ = inst block_cache::<64>$(
+            camera_clk: sys_clk,
+            rst,
+            write: match pixels.s {
+                Some((p0, p1)) => Some(p0 `concat` p1),
+                None => None
+            },
+            is_frame_start: short_packets.is_frame_start(),
+
+            dram_clk,
+            avalon,
+            dbg,
+        );
+
+        // let _ = inst write_cache$(
+        //     camera_clk: sys_clk,
+        //     rst,
+        //     write: match pixels.s {
+        //         Some((p0, p1)) => Some(p0 `concat` p1),
+        //         None => None
+        //     },
+        //     is_frame_start: short_packets.is_frame_start(),
+
+        //     dram_clk,
+        //     avalon,
+        //     dbg: cache_dbg,
+        // );
+}
+

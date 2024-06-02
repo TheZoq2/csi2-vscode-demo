@@ -1,0 +1,29 @@
+use std::ports::new_mut_wire;
+use std::ports::read_mut_wire;
+
+#[no_mangle]
+entity ODDRX1F(
+    #[no_mangle] SCLK: clock,
+    #[no_mangle] RST: bool,
+    #[no_mangle] D0: bool,
+    #[no_mangle] D1: bool,
+    #[no_mangle] Q: &mut bool,
+) __builtin__
+
+entity oddrx1f(
+    sclk: clock,
+    rst: bool,
+    // unpacked into {D1, D0}
+    d: int<2>,
+) -> bool {
+    let o = inst new_mut_wire();
+
+    let _ = inst ODDRX1F$(
+        D0: (d & 1) == 1,
+        D1: ((d >> 1) & 1) == 1,
+        SCLK: sclk,
+        RST: rst,
+        Q: o
+    );
+    inst read_mut_wire(o)
+}

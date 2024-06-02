@@ -1,0 +1,173 @@
+use std::ports::new_mut_wire;
+use std::ports::read_mut_wire;
+
+struct CtrlSignals {
+    address: uint<24>,
+    burstcount: uint<8>,
+    byteenable: uint<2>,
+    read: bool,
+    write: bool,
+    writedata: uint<16>,
+}
+
+fn ctrl_unused() -> CtrlSignals {
+    CtrlSignals$(
+        address: 0,
+        burstcount: 0,
+        byteenable: 0,
+        read: false,
+        write: false,
+        writedata: 0,
+    )
+}
+
+struct port AvalonPort {
+    address: &mut uint<24>,
+    burstcount: &mut uint<8>,
+    byteenable: &mut uint<2>,
+    read: &mut bool,
+    readdata: &uint<16>,
+    readdatavalid: &bool,
+    waitrequest: &bool,
+    write: &mut bool,
+    writedata: &mut uint<16>,
+}
+
+impl AvalonPort {
+    entity unused(self) {
+        self.inst with_control_signals(ctrl_unused())
+    }
+
+    entity with_control_signals(self, ctrl: CtrlSignals) {
+        set self.address = ctrl.address;
+        set self.burstcount = ctrl.burstcount;
+        set self.byteenable = ctrl.byteenable;
+        set self.read = ctrl.read;
+        set self.write = ctrl.write;
+        set self.writedata = ctrl.writedata;
+    }
+}
+
+
+enum BurstWriterState {
+    WaitStart,
+    Write{base_addr: uint<24>, num_left: uint<8>, burst_length: uint<8>},
+}
+
+
+struct port ReadAddrPort {
+    addr_count: &Option<(uint<24>, uint<8>)>,
+    ready: &mut bool,
+}
+
+struct port BurstWritePort {
+    offset: &uint<8>,
+    value: &mut uint<16>,
+}
+
+
+impl AvalonPort {
+
+    // Read data in bursts. Data is returned sequentially. If multiple read transactions
+    // are started, they are performed sequentially. It is not nessecary to wait for all
+    // data to be returned before asserting base_addr again
+    entity burst_reader(
+        self,
+        clk: clock,
+        rst: bool,
+        read: ReadAddrPort
+    ) -> Option<uint<16>> {
+        let ctrl = match *read.addr_count {
+            Some((addr, count)) => {
+                CtrlSignals$(
+                    address: addr,
+                    burstcount: count,
+                    byteenable: 0b11,
+                    read: true,
+                    write: false,
+                    writedata: 0
+                )
+            },
+            None => {
+                CtrlSignals$(
+                    address: 0,
+                    burstcount: 0,
+                    byteenable: 0b11,
+                    read: false,
+                    write: false,
+                    writedata: 0
+                )
+            }
+        };
+
+        let _ = self.inst with_control_signals(ctrl);
+
+        set read.ready = !(*self.waitrequest);
+
+        if *(self.readdatavalid) {
+            Some(*self.readdata)
+        } else {
+            None()
+        }
+    }
+
+    /// A buffered writer which after setting `base_addr` to `Some(base)` will burst
+    /// write the data from the returned port to `base_addr + port.offset`
+    /// Additional base_addr assertions before the burst is done are ignored. The burst length
+    /// is specified by the second parameter
+    entity burst_writer(
+        self,
+        clk: clock,
+        rst: bool,
+        base_addr: Option<(uint<24>, uint<8>)>
+    ) -> BurstWritePort {
+        reg(clk) state reset(rst: BurstWriterState::WaitStart) = match (state, *self.waitrequest) {
+            (BurstWriterState::WaitStart, _) => {
+                match base_addr {
+                    Some((base_addr, len)) => BurstWriterState::Write$(
+                        base_addr,
+                        num_left: trunc(len),
+                        burst_length: len
+                    ),
+                    None => BurstWriterState::WaitStart,
+                }
+            },
+            // Hold for wait request
+            (_, true) => state,
+            (BurstWriterState::Write$(base_addr, num_left: 1, burst_length: _), false) => {
+                BurstWriterState::WaitStart
+            },
+            (BurstWriterState::Write$(base_addr, num_left, burst_length), false) => {
+                BurstWriterState::Write$(base_addr, num_left: trunc(num_left - 1), burst_length)
+            }
+        };
+
+        let write_data = inst new_mut_wire();
+
+        let ctrl = match state {
+            BurstWriterState::WaitStart => ctrl_unused(),
+            BurstWriterState::Write$(base_addr, num_left, burst_length) => {
+                CtrlSignals$(
+                    address: trunc(base_addr + zext(burst_length - num_left)),
+                    // We only need to set this on the first burst, but it is
+                    // easier to keep it set constantly
+                    burstcount: burst_length,
+                    byteenable: 0b11,
+                    read: false,
+                    write: true,
+                    writedata: inst read_mut_wire(write_data),
+                )
+            }
+        };
+
+        let _ = self.inst with_control_signals(ctrl);
+
+        BurstWritePort$(
+            offset: match state {
+                BurstWriterState::WaitStart => &0,
+                BurstWriterState::Write$(base_addr, num_left, burst_length) => &trunc(burst_length - num_left),
+            },
+            value: write_data
+        )
+    }
+}

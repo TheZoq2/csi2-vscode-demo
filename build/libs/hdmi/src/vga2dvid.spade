@@ -1,0 +1,83 @@
+// Ported from the vhdl2v generated result of https:
+// //github.com/emard/ulx3s-misc/blob/master/examples/dvi/hdl/vga2dvid.vhd
+
+use lib::tmds::tmds_encoder_wrapper;
+use vga::vga::VgaOutput;
+
+struct DviOut {
+    r: int<2>,
+    g: int<2>,
+    b: int<2>,
+    clock: int<2>,
+}
+
+entity vga2dvid(
+    clk_pixel: clock,
+    clk_shift: clock,
+    rst: bool,
+    hsync: bool,
+    vsync: bool,
+    blank: bool,
+    color: (int<8>, int<8>, int<8>)
+) -> DviOut {
+    let one: int<2> = 1;
+    let hsync_int: int<1> = if hsync {trunc(one)} else {0};
+    let vsync_int: int<1> = if vsync {trunc(one)} else {0};
+
+    let c_red = 0;
+    let c_green = 0;
+    let c_blue = vsync_int `concat` hsync_int;
+
+    let (r,g,b) = color;
+
+    let encoded_red = inst lib::tmds::tmds_encoder_wrapper$(
+        clk: clk_pixel,
+        data: r,
+        c: c_red,
+        blank: blank,
+    );
+    let encoded_green = inst lib::tmds::tmds_encoder_wrapper$(
+        clk: clk_pixel,
+        data: g,
+        c: c_green,
+        blank: blank,
+    );
+    let encoded_blue = inst lib::tmds::tmds_encoder_wrapper$(
+        clk: clk_pixel,
+        data: b,
+        c: c_blue,
+        blank: blank,
+    );
+
+    reg(clk_pixel) latched_pixels = (encoded_red, encoded_green, encoded_blue);
+
+
+    let shift_clock_initial: int<10> = 0b0000011111;
+    reg(clk_shift) shift_clock: int<10> reset(rst: shift_clock_initial) = {
+        // Computes this (would be much prettier if spade had decent support
+        // for bit field indexing)
+        // shift_clock <= {shift_clock[1:0],shift_clock[9:2]};
+        let upper: int<2> = trunc(shift_clock);
+        let rest: int<8> = trunc(shift_clock >> 2);
+        upper `concat` rest
+    };
+
+    reg(clk_shift) (shift_red, shift_green, shift_blue) = {
+        let shift_comp: int<2> = trunc(shift_clock >> 4);
+        if shift_comp == (trunc(shift_clock_initial >> 4)) {
+            latched_pixels
+        }
+        else {
+            (shift_red >> 2, shift_green >> 2, shift_blue >> 2)
+        }
+    };
+
+
+    // TODO: Set
+    DviOut $(
+        r: trunc(shift_red),
+        g: trunc(shift_green),
+        b: trunc(shift_blue),
+        clock: trunc(shift_clock)
+    )
+}

@@ -1,0 +1,123 @@
+#[no_mangle]
+entity tmds_encoder_wrapper(clk: clock, data: int<8>, c: int<2>, blank: bool) -> int<10> __builtin__
+
+
+// entity tmds_encoder(
+//     clk: clock,
+//     data_int: int<8>,
+//     c: int<2>,
+//     blank: bool,,
+// ) -> int<10> {
+//     let data = [
+//         data_int & 1
+//         data_int >> 1 & 1
+//         data_int >> 2 & 1
+//         data_int >> 3 & 1
+//         data_int >> 4 & 1
+//         data_int >> 5 & 1
+//         data_int >> 6 & 1
+//         data_int >> 7 & 1
+//     ];
+//     wire [8:0] xored;
+//     // Decl couldcreate combinational loop, but no loops are present
+//     decl xored;
+//     let xored = [
+//         data[0],
+//         data[1] ^^ xored[0],
+//         data[2] ^^ xored[1],
+//         data[3] ^^ xored[2],
+//         data[4] ^^ xored[3],
+//         data[5] ^^ xored[4],
+//         data[6] ^^ xored[5],
+//         data[7] ^^ xored[6],
+//         true
+//     ];
+//     decl xnored;
+//     let xored = [
+//         data[0],
+//         data[1] ^^ xnored[0],
+//         data[2] ^^ xnored[1],
+//         data[3] ^^ xnored[2],
+//         data[4] ^^ xnored[3],
+//         data[5] ^^ xnored[4],
+//         data[6] ^^ xnored[5],
+//         data[7] ^^ xnored[6],
+//         true
+//     ];
+// 
+//     let ones = data[0] + data[1] + data[2] + data[3] + data[4] + data[5] + data[6] + data[7];
+// 
+//     // Decide the encoding
+//     let (data_word, data_word_inv) = if 
+// }
+// 
+// 
+// 
+// 
+// wire [8:0] xored;
+// wire [8:0] xnored;
+// wire [3:0] ones;
+// reg [8:0] data_word;
+// reg [8:0] data_word_inv;
+// wire [3:0] data_word_disparity;
+// reg [3:0] dc_bias = 1'b0;
+// 
+//   // Decide which encoding to use
+//   always @(ones, data[0], xnored, xored) begin
+//     if(ones > 4 || (ones == 4 && data[0] == 1'b0)) begin
+//       data_word <= xnored;
+//       data_word_inv <=  ~(xnored);
+//     end
+//     else begin
+//       data_word <= xored;
+//       data_word_inv <=  ~(xored);
+//     end
+//   end
+// 
+//   // Work out the DC bias of the dataword;
+//   assign data_word_disparity = 4'b1100 + data_word[0] + data_word[1] + data_word[2] + data_word[3] + data_word[4] + data_word[5] + data_word[6] + data_word[7];
+//   // Now work out what the output should be
+//   always @(posedge clk) begin
+//     if(blank == 1'b1) begin
+//       // In the control periods, all values have and have balanced bit count
+//       case(c)
+//       2'b00 : begin
+//         encoded <= 10'b1101010100;
+//       end
+//       2'b01 : begin
+//         encoded <= 10'b0010101011;
+//       end
+//       2'b10 : begin
+//         encoded <= 10'b0101010100;
+//       end
+//       default : begin
+//         encoded <= 10'b1010101011;
+//       end
+//       endcase
+//       dc_bias <= {4{1'b0}};
+//     end
+//     else begin
+//       if(dc_bias == 5'b00000 || data_word_disparity == 0) begin
+//         // dataword has no disparity
+//         if(data_word[8] == 1'b1) begin
+//           encoded <= {2'b01,data_word[7:0]};
+//           dc_bias <= dc_bias + data_word_disparity;
+//         end
+//         else begin
+//           encoded <= {2'b10,data_word_inv[7:0]};
+//           dc_bias <= dc_bias - data_word_disparity;
+//         end
+//       end
+//       else if((dc_bias[3] == 1'b0 && data_word_disparity[3] == 1'b0) || (dc_bias[3] == 1'b1 && data_word_disparity[3] == 1'b1)) begin
+//         encoded <= {1'b1,data_word[8],data_word_inv[7:0]};
+//         dc_bias <= dc_bias + data_word[8] - data_word_disparity;
+//       end
+//       else begin
+//         encoded <= {1'b0,data_word};
+//         dc_bias <= dc_bias - data_word_inv[8] + data_word_disparity;
+//       end
+//     end
+//   end
+// 
+// 
+// endmodule

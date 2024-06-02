@@ -1,0 +1,87 @@
+
+// Ported to Spade from this implementation
+// https://github.com/gatecat/CSI2Rx/blob/master/verilog_cores/csi/header_ecc.v
+fn csi_header_ecc (
+    // Byte 0 bit 8 is the msb
+    data: uint<24>,
+) -> uint<8> {
+    let data = std::conv::uint_to_bits(data);
+
+    let d0 = data[0];
+    let d1 = data[1];
+    let d2 = data[2];
+    let d3 = data[3];
+    let d4 = data[4];
+    let d5 = data[5];
+    let d6 = data[6];
+    let d7 = data[7];
+
+    std::conv::bits_to_uint([
+        data[0] ^^ data[1] ^^ data[2] ^^ data[4] ^^ data[5] ^^ data[7] ^^ data[10] ^^ data[11] ^^ data[13] ^^ data[16] ^^ data[20] ^^ data[21] ^^ data[22] ^^ data[23],
+        data[0] ^^ data[1] ^^ data[3] ^^ data[4] ^^ data[6] ^^ data[8] ^^ data[10] ^^ data[12] ^^ data[14] ^^ data[17] ^^ data[20] ^^ data[21] ^^ data[22] ^^ data[23],
+        data[0] ^^ data[2] ^^ data[3] ^^ data[5] ^^ data[6] ^^ data[9] ^^ data[11] ^^ data[12] ^^ data[15] ^^ data[18] ^^ data[20] ^^ data[21] ^^ data[22],
+        data[1] ^^ data[2] ^^ data[3] ^^ data[7] ^^ data[8] ^^ data[9] ^^ data[13] ^^ data[14] ^^ data[15] ^^ data[19] ^^ data[20] ^^ data[21] ^^ data[23],
+        data[4] ^^ data[5] ^^ data[6] ^^ data[7] ^^ data[8] ^^ data[9] ^^ data[16] ^^ data[17] ^^ data[18] ^^ data[19] ^^ data[20] ^^ data[22] ^^ data[23],
+        data[10] ^^ data[11] ^^ data[12] ^^ data[13] ^^ data[14] ^^ data[15] ^^ data[16] ^^ data[17] ^^ data[18] ^^ data[19] ^^ data[21] ^^ data[22] ^^ data[23],
+        false,
+        false
+    ])
+}
+
+struct EccOut {
+    data: [uint<8>; 3],
+    applied_correction: bool,
+    error: bool,
+}
+fn apply_header_ecc(
+    data: [uint<8>; 3],
+    in_ecc: uint<8>,
+) -> EccOut {
+
+    let data_int = data[2] `concat` data[1] `concat` data[0];
+
+    let computed_ecc = csi_header_ecc(data_int);
+    let syndrome = in_ecc ^ computed_ecc;
+
+    let correction_bit: uint<24> =
+        match syndrome {
+            0x07 => 1 << 0,
+            0x0B => 1 << 1,
+            0x0D => 1 << 2,
+            0x0E => 1 << 3,
+            0x13 => 1 << 4,
+            0x15 => 1 << 5,
+            0x16 => 1 << 6,
+            0x19 => 1 << 7,
+            0x1A => 1 << 8,
+            0x1C => 1 << 9,
+            0x23 => 1 << 10,
+            0x25 => 1 << 11,
+            0x26 => 1 << 12,
+            0x29 => 1 << 13,
+            0x2A => 1 << 14,
+            0x2C => 1 << 15,
+            0x31 => 1 << 16,
+            0x32 => 1 << 17,
+            0x34 => 1 << 18,
+            0x38 => 1 << 19,
+            0x1F => 1 << 20,
+            0x2F => 1 << 21,
+            0x37 => 1 << 22,
+            0x3B => 1 << 23,
+            _ => 0
+        };
+
+    let corrected = data_int ^ correction_bit;
+
+    EccOut $(
+        data: [
+            trunc(corrected),
+            trunc(corrected >> 8),
+            trunc(corrected >> 16),
+        ],
+        applied_correction: correction_bit != 0,
+        error: syndrome != 0 && correction_bit == 0,
+
+    )
+}

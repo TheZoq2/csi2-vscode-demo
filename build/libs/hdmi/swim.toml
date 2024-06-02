@@ -1,0 +1,33 @@
+name = "hdmi"
+
+extra_verilog = [
+    "src/ecp5pll.sv",
+    "src/plls.sv",
+    "src/hacks.sv",
+    "src/example_verilog/fake_differential.v",
+    "src/example_verilog/vga2dvid.v",
+    "src/example_verilog/tmds_encoder.v",
+]
+
+[libraries]
+vga = {git = "https://gitlab.com/TheZoq2/vga_spade.git", branch="main"}
+
+[synthesis]
+top = "main"
+extra_verilog = []
+command = "synth_ecp5"
+
+[pnr]
+architecture = "ecp5"
+device = "LFE5U-85F"
+pin_file = "ulx3s_v20.lpf"
+package = "CABGA381"
+allow_timing_fail = true
+# allow_unconstrained=true
+
+[packing]
+tool = "ecppack"
+# idcode = "0x81112043"
+
+[upload]
+tool = "fujprog"

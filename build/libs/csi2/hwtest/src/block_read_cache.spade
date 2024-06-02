@@ -1,0 +1,637 @@
+use std::mem::ReadPort;
+use std::mem::read_read_port;
+use std::mem::WritePort;
+use std::mem::dp_bram;
+use std::cdc::handshake;
+use std::ports::new_mut_wire;
+use std::ports::read_mut_wire;
+
+use ulx3s_sdram::avalon::AvalonPort;
+use ulx3s_sdram::avalon::CtrlSignals;
+use ulx3s_sdram::avalon::ctrl_unused;
+
+use lib::ops::wrapping_increment;
+
+/*
+                                 .
+                                 .   Being drawn
+                                 .        |
+            +-----------------------------v--------------+ <- y_start_block
+Line cache: |             In cache 0    +---+            |
+            +---------------------------|   |------------+ <- y_start_block + 8
+Line cache: |             In cache 1    +---+            |
+            +--------------------------------------------+ <- y_start_block + 32
+            |                                            |
+            +--------------------------------------------+ <- y_start_block + 40
+Line cache: |             Being filled ...               |
+            +--------------------------------------------+ <- Next eviction start (y_start_block + 40)
+                                 .
+                                 .
+                                 .
+*/
+
+struct FrameData {
+    numxpixels: uint<16>,
+}
+
+struct ImageData {
+    block_height: uint<16>,
+    numxpixels: uint<16>,
+    numxblocks: uint<16>,
+}
+
+struct BlockCoord {
+    x: uint<16>,
+    y: uint<16>,
+}
+
+impl BlockCoord {
+    fn block_address(self, numxblocks: uint<16>) -> uint<24> {
+        let _64: uint<7> = 64;
+        trunc(((self.x + self.y) * numxblocks) * _64)
+    }
+}
+
+struct CacheCoord {
+    x: uint<16>,
+    // 0..8
+    y: uint<3>
+}
+impl CacheCoord {
+    fn address(self, image_data: ImageData) -> uint<16> {
+        trunc(zext(self.x >> 1) + self.y * (image_data.numxpixels >> 1))
+    }
+
+    fn add(self, x: int<16>, y: int<3>) -> CacheCoord {
+        CacheCoord$(
+            x: trunc(self.x + int_to_uint(x)),
+            y: trunc(self.y + int_to_uint(y)),
+        )
+    }
+
+    // Returns true if the lsbs of the x and y coordinates match xx and yy
+    fn is_xx_yy(self, xx: uint<2>, yy: uint<2>) -> bool {
+        trunc(self.x) == xx && trunc(self.y) == yy
+    }
+
+    fn to_local_address(self, image_data: ImageData) -> uint<33> {
+        let num_u16s: uint<29> = image_data.numxblocks * 8;
+        let y_contrib = self.y * num_u16s;
+        trunc(zext(self.x) + y_contrib)
+    }
+}
+
+struct TruncatedCacheCoord {
+    x: uint<14>,
+    y: uint<14>,
+}
+
+
+
+struct port ToWriter {
+    start_fetch_block: &Option<BlockCoord>,
+    _dummy: &mut bool,
+}
+
+
+enum WCtrlState {
+    Idle,
+    Run{left_to_request: uint<16>, start: uint<24>, offset: uint<24>}
+}
+
+fn full_to_cache_coords(address: uint<24>, numxblocks: uint<16>) -> CacheCoord {
+    let block_idx = address >> 6;
+    let inner_addres: uint<6> = trunc(address);
+    let x: uint<3> = trunc(inner_addres);
+    let y: uint<3> = trunc(inner_addres >> 3);
+
+    let full_x: uint<32> = (block_idx * 8) + zext(x);
+    CacheCoord(trunc(full_x), y)
+}
+
+pipeline(0) line_cache_writer<#NumXBlocks>(
+    dram_clk: clock,
+    rst: bool,
+    from_reader: ToWriter,
+    image_data: ImageData,
+    avalon: AvalonPort,
+    pixel_clk: clock,
+    xblocks_to_fetch: uint<16>,
+    // Compound ports are currently very broken, so...
+    write00: WritePort<12, uint<16>>,
+    write01: WritePort<12, uint<16>>,
+    write02: WritePort<12, uint<16>>,
+    write03: WritePort<12, uint<16>>,
+    write10: WritePort<12, uint<16>>,
+    write11: WritePort<12, uint<16>>,
+    write12: WritePort<12, uint<16>>,
+    write13: WritePort<12, uint<16>>,
+    write20: WritePort<12, uint<16>>,
+    write21: WritePort<12, uint<16>>,
+    write22: WritePort<12, uint<16>>,
+    write23: WritePort<12, uint<16>>,
+    write30: WritePort<12, uint<16>>,
+    write31: WritePort<12, uint<16>>,
+    write32: WritePort<12, uint<16>>,
+    write33: WritePort<12, uint<16>>,
+) {
+        set from_reader._dummy = false;
+        let numxblocks: uint<16> = NumXBlocks;
+
+        let start_fetch_block = inst std::cdc::handshake(
+            pixel_clk,
+            rst,
+            *from_reader.start_fetch_block,
+            dram_clk
+        );
+
+        reg(dram_clk) start = match start_fetch_block {
+            Some(new) => new.block_address(numxblocks),
+            None => start
+        };
+
+        reg(dram_clk) state reset(rst: WCtrlState::Idle) = match state {
+            WCtrlState::Idle => match start_fetch_block {
+                Some(start) => WCtrlState::Run$(
+                    left_to_request: xblocks_to_fetch,
+                    start: start.block_address(numxblocks),
+                    offset: 0
+                ),
+                None => state
+            },
+            WCtrlState::Run$(left_to_request: 1, start: _, offset: _) => WCtrlState::Idle,
+            WCtrlState::Run$(left_to_request, start, offset) => {
+                if *avalon.waitrequest {
+                    state
+                } else {
+                    WCtrlState::Run$(left_to_request: trunc(left_to_request-1), start, offset: trunc(offset + 64))
+                }
+            }
+        };
+
+        let avalon_ctrl = match state {
+            WCtrlState::Idle => ctrl_unused(),
+            WCtrlState::Run$(left_to_request: _, start, offset) => CtrlSignals$(
+                address: trunc(start + offset),
+                burstcount: 64,
+                byteenable: 0b11,
+                read: true,
+                write: false,
+                writedata: 0,
+            )
+        };
+
+        let _ = avalon.inst with_control_signals(avalon_ctrl);
+
+        reg(dram_clk) read_offset = match start_fetch_block {
+            Some(_) => 0,
+            None => if *(avalon.readdatavalid) {
+                trunc(read_offset + 1)
+            } else {
+                read_offset
+            }
+        };
+
+        // Convert the dram address which is blocks into an offset in the 'frame'.
+        let coord = full_to_cache_coords(read_offset, numxblocks);
+        let addr = coord.to_local_address(image_data);
+
+
+        let write = if *avalon.readdatavalid {
+            Some(*avalon.readdata)
+        } else {
+            None
+        };
+
+        set write00.addr = trunc(addr);
+        set write01.addr = trunc(addr);
+        set write02.addr = trunc(addr);
+        set write03.addr = trunc(addr);
+        set write10.addr = trunc(addr);
+        set write11.addr = trunc(addr);
+        set write12.addr = trunc(addr);
+        set write13.addr = trunc(addr);
+        set write20.addr = trunc(addr);
+        set write21.addr = trunc(addr);
+        set write22.addr = trunc(addr);
+        set write23.addr = trunc(addr);
+        set write30.addr = trunc(addr);
+        set write31.addr = trunc(addr);
+        set write32.addr = trunc(addr);
+        set write33.addr = trunc(addr);
+
+        set write00.write = if true || coord.is_xx_yy(0b00, 0b00) {write} else {None};
+        set write01.write = if true || coord.is_xx_yy(0b00, 0b01) {write} else {None};
+        set write02.write = if true || coord.is_xx_yy(0b00, 0b10) {write} else {None};
+        set write03.write = if true || coord.is_xx_yy(0b00, 0b11) {write} else {None};
+        set write10.write = if true || coord.is_xx_yy(0b01, 0b00) {write} else {None};
+        set write11.write = if true || coord.is_xx_yy(0b01, 0b01) {write} else {None};
+        set write12.write = if true || coord.is_xx_yy(0b01, 0b10) {write} else {None};
+        set write13.write = if true || coord.is_xx_yy(0b01, 0b11) {write} else {None};
+        set write20.write = if true || coord.is_xx_yy(0b10, 0b00) {write} else {None};
+        set write21.write = if true || coord.is_xx_yy(0b10, 0b01) {write} else {None};
+        set write22.write = if true || coord.is_xx_yy(0b10, 0b10) {write} else {None};
+        set write23.write = if true || coord.is_xx_yy(0b10, 0b11) {write} else {None};
+        set write30.write = if true || coord.is_xx_yy(0b11, 0b00) {write} else {None};
+        set write31.write = if true || coord.is_xx_yy(0b11, 0b01) {write} else {None};
+        set write32.write = if true || coord.is_xx_yy(0b11, 0b10) {write} else {None};
+        set write33.write = if true || coord.is_xx_yy(0b11, 0b11) {write} else {None};
+}
+
+pipeline(1) line_cache<#NumXBlocks>(
+    pixel_clk: clock,
+    rst: bool,
+    // Start to fill the cache with the content from this address onwards
+    start_fetch: Option<BlockCoord>,
+    read_center: CacheCoord,
+    xblocks_to_fetch: uint<16>,
+    frame_data: FrameData,
+    image_data: ImageData,
+
+    avalon: AvalonPort,
+    dram_clk: clock,
+) -> [[uint<16>; 3]; 3] {
+        let (from_reader, to_writer) = port;
+
+        set to_writer.start_fetch_block = start_fetch;
+
+        let (write00, read00) = inst dp_bram::<12, uint<16>, 4096>$(write_clk: dram_clk, read_clk: pixel_clk);
+        let (write01, read01) = inst dp_bram::<12, uint<16>, 4096>$(write_clk: dram_clk, read_clk: pixel_clk);
+        let (write02, read02) = inst dp_bram::<12, uint<16>, 4096>$(write_clk: dram_clk, read_clk: pixel_clk);
+        let (write03, read03) = inst dp_bram::<12, uint<16>, 4096>$(write_clk: dram_clk, read_clk: pixel_clk);
+        let (write10, read10) = inst dp_bram::<12, uint<16>, 4096>$(write_clk: dram_clk, read_clk: pixel_clk);
+        let (write11, read11) = inst dp_bram::<12, uint<16>, 4096>$(write_clk: dram_clk, read_clk: pixel_clk);
+        let (write12, read12) = inst dp_bram::<12, uint<16>, 4096>$(write_clk: dram_clk, read_clk: pixel_clk);
+        let (write13, read13) = inst dp_bram::<12, uint<16>, 4096>$(write_clk: dram_clk, read_clk: pixel_clk);
+        let (write20, read20) = inst dp_bram::<12, uint<16>, 4096>$(write_clk: dram_clk, read_clk: pixel_clk);
+        let (write21, read21) = inst dp_bram::<12, uint<16>, 4096>$(write_clk: dram_clk, read_clk: pixel_clk);
+        let (write22, read22) = inst dp_bram::<12, uint<16>, 4096>$(write_clk: dram_clk, read_clk: pixel_clk);
+        let (write23, read23) = inst dp_bram::<12, uint<16>, 4096>$(write_clk: dram_clk, read_clk: pixel_clk);
+        let (write30, read30) = inst dp_bram::<12, uint<16>, 4096>$(write_clk: dram_clk, read_clk: pixel_clk);
+        let (write31, read31) = inst dp_bram::<12, uint<16>, 4096>$(write_clk: dram_clk, read_clk: pixel_clk);
+        let (write32, read32) = inst dp_bram::<12, uint<16>, 4096>$(write_clk: dram_clk, read_clk: pixel_clk);
+        let (write33, read33) = inst dp_bram::<12, uint<16>, 4096>$(write_clk: dram_clk, read_clk: pixel_clk);
+
+        let _ = inst(0) line_cache_writer::<NumXBlocks>(
+            dram_clk,
+            rst,
+            from_reader,
+            image_data,
+            avalon,
+            pixel_clk,
+            xblocks_to_fetch,
+            // Compound ports are currently very broken, so...
+            write00,
+            write01,
+            write02,
+            write03,
+            write10,
+            write11,
+            write12,
+            write13,
+            write20,
+            write21,
+            write22,
+            write23,
+            write30,
+            write31,
+            write32,
+            write33,
+        );
+
+        let read_addrs00 = trunc(read_center.add(-1, -1).address(image_data));
+        let read_addrs01 = trunc(read_center.add(-1,  0).address(image_data));
+        let read_addrs02 = trunc(read_center.add(-1,  1).address(image_data));
+        let read_addrs03 = trunc(read_center.add(-1,  1).address(image_data));
+        let read_addrs10 = trunc(read_center.add(0, -1).address(image_data));
+        let read_addrs11 = trunc(read_center.add(0,  0).address(image_data));
+        let read_addrs12 = trunc(read_center.add(0,  1).address(image_data));
+        let read_addrs13 = trunc(read_center.add(0,  1).address(image_data));
+        let read_addrs20 = trunc(read_center.add(1, -1).address(image_data));
+        let read_addrs21 = trunc(read_center.add(1,  0).address(image_data));
+        let read_addrs22 = trunc(read_center.add(1,  1).address(image_data));
+        let read_addrs23 = trunc(read_center.add(1,  1).address(image_data));
+        let read_addrs30 = trunc(read_center.add(1, -1).address(image_data));
+        let read_addrs31 = trunc(read_center.add(1,  0).address(image_data));
+        let read_addrs32 = trunc(read_center.add(1,  1).address(image_data));
+        let read_addrs33 = trunc(read_center.add(1,  1).address(image_data));
+
+        let o00 = inst(1) read_read_port(pixel_clk, read_addrs00, read00);
+        let o01 = inst(1) read_read_port(pixel_clk, read_addrs01, read01);
+        let o02 = inst(1) read_read_port(pixel_clk, read_addrs02, read02);
+        let o03 = inst(1) read_read_port(pixel_clk, read_addrs03, read03);
+        let o10 = inst(1) read_read_port(pixel_clk, read_addrs10, read10);
+        let o11 = inst(1) read_read_port(pixel_clk, read_addrs11, read11);
+        let o12 = inst(1) read_read_port(pixel_clk, read_addrs12, read12);
+        let o13 = inst(1) read_read_port(pixel_clk, read_addrs13, read13);
+        let o20 = inst(1) read_read_port(pixel_clk, read_addrs20, read20);
+        let o21 = inst(1) read_read_port(pixel_clk, read_addrs21, read21);
+        let o22 = inst(1) read_read_port(pixel_clk, read_addrs22, read22);
+        let o23 = inst(1) read_read_port(pixel_clk, read_addrs23, read23);
+        let o30 = inst(1) read_read_port(pixel_clk, read_addrs30, read30);
+        let o31 = inst(1) read_read_port(pixel_clk, read_addrs31, read31);
+        let o32 = inst(1) read_read_port(pixel_clk, read_addrs32, read32);
+        let o33 = inst(1) read_read_port(pixel_clk, read_addrs33, read33);
+    reg;
+        [
+            [o00, o01, o02],
+            [o10, o11, o12],
+            [o20, o21, o22],
+        ]
+}
+
+
+
+struct BlockReadCacheDebug {
+    evict_cache: bool,
+    top_cache: uint<2>,
+}
+
+pipeline(1) block_read_cache<#NumXBlocks>(
+    pixel_clk: clock,
+    rst: bool,
+    pixel_read_addr: Option<(uint<16>, uint<16>)>,
+    frame_data: FrameData,
+    image_data: ImageData,
+
+    xblocks_to_fetch: uint<16>,
+
+    avalon0: AvalonPort,
+    avalon1: AvalonPort,
+    avalon2: AvalonPort,
+
+    dbg: &mut BlockReadCacheDebug,
+
+    dram_clk: clock,
+) -> [[uint<16>; 3]; 3] {
+        let y_read_top = match pixel_read_addr {
+            Some((_, y)) => Some(if y == 0 {y} else {trunc(y - 1)}),
+            None => None
+        };
+
+        let (y_start_block_, top_cache_) = (stage(+0).y_start_block, stage(+0).top_cache);
+
+        let (y_start_block_next, top_cache_next, evicted_cache) = {
+            match y_read_top {
+                // We need to evict the top value if the current read is outside its range.
+                // Either if the read is above y_start_block, or below y_start_block + 8
+                Some(read_top) => {
+                    let read_top = (read_top >> 3);
+                    // Since reads are monotonic, if we read above our start, we just
+                    // wrapped around, Now y_start_block is at 0 again
+                    if read_top < y_start_block_ {
+                        (0, wrapping_increment(top_cache_, 2), Some(top_cache_))
+                    } else if read_top >= trunc(y_start_block_ + 1) {
+                        let new_y_start = trunc(y_start_block_ + 1);
+                        let y_start_block_ = if (new_y_start >= image_data.block_height) {
+                            trunc(new_y_start - image_data.block_height)
+                        } else {
+                            new_y_start
+                        };
+
+                        (new_y_start, wrapping_increment(top_cache_, 2), Some(top_cache_))
+                    } else {
+                        (y_start_block_, top_cache_, None)
+                    }
+                },
+                None => (y_start_block_, top_cache_, None)
+            }
+        };
+        reg(pixel_clk) (y_start_block, top_cache): (uint<16>, uint<2>) reset(rst: (0, 0)) = (y_start_block_next, top_cache_next);
+
+        // The address at which the next-to-be-evicted cache should read from
+        let evicted_cache_y_start_block: uint<16> = {
+            let unwrapped = y_start_block + 3;
+            if unwrapped >= zext(image_data.block_height) {
+                trunc(unwrapped - zext(image_data.block_height))
+            } else {
+                trunc(unwrapped)
+            }
+        };
+
+        let evicted_cache_start = BlockCoord$(x: 0, y: evicted_cache_y_start_block);
+
+        let (x_read, y_read) = match pixel_read_addr {
+            Some((x_read, y_read)) => (x_read, y_read),
+            None => (0, 0)
+        };
+
+        // Genreate read addresses in the y direction.
+        // The indexing here is such that the top cache is always [0]
+        let read_center = CacheCoord$(x: x_read, y: trunc(y_read));
+
+        let caches_out = [
+            inst(1) line_cache::<NumXBlocks>$(
+                pixel_clk,
+                rst,
+                start_fetch: match evicted_cache {
+                    Some(0) => Some(evicted_cache_start),
+                    _ => None,
+                },
+                read_center,
+                avalon: avalon0,
+                xblocks_to_fetch,
+                frame_data,
+                image_data,
+                dram_clk
+            ),
+            inst(1) line_cache::<NumXBlocks>$(
+                pixel_clk,
+                rst,
+                start_fetch: match evicted_cache {
+                    Some(1) => Some(evicted_cache_start),
+                    _ => None,
+                },
+                read_center,
+                avalon: avalon1,
+                xblocks_to_fetch,
+                frame_data,
+                image_data,
+                dram_clk
+            ),
+            inst(1) line_cache::<NumXBlocks>$(
+                pixel_clk,
+                rst,
+                start_fetch: match evicted_cache {
+                    Some(2) => Some(evicted_cache_start),
+                    _ => None,
+                },
+                read_center,
+                avalon: avalon2,
+                xblocks_to_fetch,
+                frame_data,
+                image_data,
+                dram_clk
+            ),
+        ];
+
+    reg;
+        let top_out = caches_out[top_cache_next];
+        let next_out = caches_out[trunc(wrapping_increment(top_cache_next, 2))];
+
+        let mid_line = if read_center.y == 0 {next_out} else {top_out};
+        let bot_line = if read_center.y == 0 || read_center.y == 1  {next_out} else {top_out};
+
+        set dbg = BlockReadCacheDebug$(
+            evict_cache: match evicted_cache {
+                Some(_) => true,
+                None => false,
+            },
+            top_cache,
+        );
+
+        [top_out[0], mid_line[1], bot_line[2]]
+}
+
+struct LineCacheOutTH {
+    read: bool,
+    address: uint<24>,
+    read_result: [[uint<16>; 3]; 3]
+}
+
+// #[no_mangle]
+// pipeline(1) brc_line_cache_th(
+//     dram_clk: clock,
+//     rst: bool,
+//     start_fetch: Option<BlockCoord>,
+//     read_addrs: [[uint<14>; 3]; 3],
+//     pixel_clk: clock,
+//     readdata: uint<16>,
+//     xblocks_to_fetch: uint<16>,
+//     readdatavalid: bool,
+// ) -> LineCacheOutTH {
+//         let address = inst new_mut_wire();
+//         let burstcount = inst new_mut_wire();
+//         let byteenable = inst new_mut_wire();
+//         let writedata = inst new_mut_wire();
+//         let avalon_write = inst new_mut_wire();
+//         let read = inst new_mut_wire();
+//         let avalon = AvalonPort$(
+//             address: address,
+//             burstcount: burstcount,
+//             byteenable: byteenable,
+//             read,
+//             readdata: &readdata,
+//             readdatavalid: &readdatavalid,
+//             waitrequest: &false,
+//             write: avalon_write,
+//             writedata: writedata,
+//         );
+// 
+//         let read_result = inst(1) line_cache::<128>$(
+//             dram_clk,
+//             rst,
+//             avalon,
+//             start_fetch,
+//             read_addrs,
+//             pixel_clk,
+//             xblocks_to_fetch
+//         );
+// 
+//     reg;
+//         LineCacheOutTH$(
+//             read: inst read_mut_wire(read),
+//             address: inst read_mut_wire(address),
+//             read_result
+//         )
+// }
+
+
+struct AvalonReadIn {
+    readdatavalid: bool,
+    readdata: uint<16>
+}
+
+struct AvalonReadSide {
+    read: bool,
+    address: uint<24>,
+}
+
+entity avalon_read_wrapper(i: AvalonReadIn) -> (AvalonPort, &AvalonReadSide) {
+    let address = inst new_mut_wire();
+    let burstcount = inst new_mut_wire();
+    let byteenable = inst new_mut_wire();
+    let writedata = inst new_mut_wire();
+    let avalon_write = inst new_mut_wire();
+    let read = inst new_mut_wire();
+    let avalon = AvalonPort$(
+        address: address,
+        burstcount: burstcount,
+        byteenable: byteenable,
+        read,
+        readdata: &i.readdata,
+        readdatavalid: &i.readdatavalid,
+        waitrequest: &false,
+        write: avalon_write,
+        writedata: writedata,
+    );
+
+    (
+        avalon,
+        &AvalonReadSide$(
+            read: inst read_mut_wire(read),
+            address: inst read_mut_wire(address),
+        )
+    )
+}
+
+struct BHCacheTHOut {
+    av0_read: AvalonReadSide,
+    av1_read: AvalonReadSide,
+    av2_read: AvalonReadSide,
+    read_result: [[uint<16>; 3]; 3]
+}
+
+#[no_mangle]
+pipeline(1) brc_block_read_cache_th(
+    pixel_clk: clock,
+    rst: bool,
+    pixel_read_addr: Option<(uint<16>, uint<16>)>,
+    // The height of the image. Must be a multiple of 8.
+    image_height: uint<16>,
+
+    av0in: AvalonReadIn,
+    av1in: AvalonReadIn,
+    av2in: AvalonReadIn,
+
+    xblocks_to_fetch: uint<16>,
+
+    dram_clk: clock,
+) -> BHCacheTHOut {
+
+        let (avalon0, av0_read) = inst avalon_read_wrapper(av0in);
+        let (avalon1, av1_read) = inst avalon_read_wrapper(av1in);
+        let (avalon2, av2_read) = inst avalon_read_wrapper(av2in);
+
+        let read_result = inst(1) block_read_cache::<64>$(
+            pixel_clk,
+            rst,
+            pixel_read_addr,
+            frame_data: lib::block_read_cache::FrameData$(
+                numxpixels: 480,
+            ),
+            image_data: lib::block_read_cache::ImageData$(
+                block_height: image_height >> 3,
+                numxpixels: 1024,
+                numxblocks: 64,
+            ),
+
+            avalon0,
+            avalon1,
+            avalon2,
+
+            xblocks_to_fetch,
+
+            dbg: inst new_mut_wire(),
+
+            dram_clk,
+        );
+
+    reg;
+        BHCacheTHOut$(
+            av0_read: *av0_read,
+            av1_read: *av1_read,
+            av2_read: *av2_read,
+            read_result
+        )
+}

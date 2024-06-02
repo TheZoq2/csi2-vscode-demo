@@ -1,0 +1,67 @@
+use vga::vga::VgaTiming;
+use vga::vga::VgaOutput;
+use vga::vga::vga_output;
+use vga::vga::vga_fsm;
+
+use lib::vga2dvid::DviOut;
+use lib::vga2dvid::vga2dvid;
+use lib::plls::pll_1366_768_30;
+use lib::plls::pll_480_800_60;
+use lib::plls::Clocks;
+use lib::ecp5stubs::oddrx1f;
+use lib::hacks::unlaunder_clock;
+
+entity main(
+    #[no_mangle] clk_25mhz: clock,
+    #[no_mangle] gpdi_dp: &mut [bool; 4],
+) {
+
+    let Clocks$(clk_pixel: vga_clk, clk_shift) = inst pll_480_800_60(clk_25mhz);
+
+    reg(vga_clk) rst initial(true) = false;
+
+    let x_pixels = 480;
+    let y_pixels = 800;
+    // These timings are from https://tomverbeure.github.io/video_timings_calculator
+    let timing = VgaTiming$(
+        x_pixels: x_pixels,
+        x_front_porch: 24,
+        x_sync_width: 48,
+        x_back_porch: 72,
+        y_pixels: y_pixels,
+        y_front_porch: 3,
+        y_sync_width: 10,
+        y_back_porch: 18,
+    );
+
+    let vga_state = inst vga_fsm$(clk: vga_clk, rst, clk_enable: true, timing);
+    let VgaOutput$(hsync, vsync, blank, pixel) = vga_output(vga_state);
+
+    let color = match pixel {
+        Some((x,y)) => {
+            (trunc(x), trunc(y), if x > y {127} else {0})
+        },
+        None => {
+            (0,0,0)
+        }
+    };
+
+    let dvi = inst vga2dvid$(
+        clk_pixel: vga_clk,
+        clk_shift,
+        rst,
+        hsync,
+        vsync,
+        blank,
+        color
+    );
+
+
+    set gpdi_dp = [
+        inst oddrx1f(clk_shift, false, dvi.b),
+        inst oddrx1f(clk_shift, false, dvi.g),
+        inst oddrx1f(clk_shift, false, dvi.r),
+        inst oddrx1f(clk_shift, false, dvi.clock),
+    ];
+}
+

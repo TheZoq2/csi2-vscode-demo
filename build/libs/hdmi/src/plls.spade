@@ -1,0 +1,16 @@
+struct port Clocks {
+    clk_pixel: clock,
+    clk_shift: clock,
+}
+#[no_mangle]
+entity pll_640_480_60(#[no_mangle] clk_25mhz: clock) -> Clocks __builtin__
+#[no_mangle]
+entity pll_1366_768_30(#[no_mangle] clk_25mhz: clock) -> Clocks __builtin__
+#[no_mangle]
+entity pll_1280_720_30(#[no_mangle] clk_25mhz: clock) -> Clocks __builtin__
+#[no_mangle]
+entity pll_1280_720_60(#[no_mangle] clk_25mhz: clock) -> Clocks __builtin__
+#[no_mangle]
+entity pll_1024_600_60(#[no_mangle] clk_25mhz: clock) -> Clocks __builtin__
+#[no_mangle]
+entity pll_480_800_60(#[no_mangle] clk_25mhz: clock) -> Clocks __builtin__

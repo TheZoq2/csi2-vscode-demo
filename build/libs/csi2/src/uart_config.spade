@@ -1,0 +1,49 @@
+use protocols::uart::UartConfig;
+use protocols::uart::uart_rx;
+
+struct Command {
+    target: uint<8>,
+    payload: [uint<8>; 3]
+}
+
+enum UCState {
+    WaitBytes{mask: uint<4>, word: uint<32>},
+    Complete{word: uint<32>}
+}
+
+entity uart_configurator(
+    clk: clock,
+    rst: bool,
+    rx: bool,
+    uart_config: UartConfig
+) -> Option<Command> {
+    let uart_out = inst uart_rx(clk, rst, rx, uart_config).strip_parity();
+
+    reg(clk) state reset(rst: UCState::WaitBytes(0b1111, 0)) = match state {
+        UCState::WaitBytes$(mask, word) => {
+            match uart_out {
+                Some(b) => {
+                    let next_word = (word << 8) | zext(b);
+                    if mask == 0b0001 {
+                        UCState::Complete(next_word)
+                    } else {
+                        UCState::WaitBytes(mask >> 1, next_word)
+                    }
+                },
+                None => state
+            }
+        },
+        UCState::Complete(_) => UCState::WaitBytes(0b1111, 0)
+    };
+
+    match state {
+        UCState::Complete(word) => {
+            let split = [trunc(word >> 24), trunc(word >> 16), trunc(word >> 8), trunc(word)];
+
+            Some(Command$(target: split[0], payload: split[1:4]))
+        },
+        _ => None
+    }
+}
+
+

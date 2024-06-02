@@ -1,0 +1,226 @@
+use std::ops::div_pow2;
+
+struct UartConfig {
+    bit_time: uint<15>,
+    parity: bool,
+    stop_bits: uint<3>
+}
+
+struct TxOut {
+    /// TX signal to feed to the external device
+    tx: bool,
+    /// Indicates whether or not the device is ready to transmit another byte
+    ready: bool
+}
+
+enum TxState {
+    Idle,
+    StartBit{time: uint<15>, to_tx: uint<8>},
+    Bit{time: uint<15>, num_left: uint<4>, to_tx: uint<8>, odd_parity: bool},
+    Parity{time: uint<15>, odd: bool},
+    StopBit{time: uint<15>, count: uint<3>}
+}
+
+entity uart_tx(
+    clk: clock,
+    rst: bool,
+    transmit: Option<uint<8>>,
+    config: UartConfig
+) -> TxOut {
+    reg(clk) state reset (rst: TxState::Idle()) = {
+        match state {
+            TxState::Idle => {
+                match transmit {
+                    // lifeguard spade#132
+                    Some(data) => TxState::StartBit(0, data),
+                    None => TxState::Idle()
+                }
+            },
+            TxState::StartBit$(time, to_tx) => {
+                if time == trunc(config.bit_time - 1) {
+                    TxState::Bit(0, 7, to_tx, ((to_tx & 1) == 1))
+                }
+                else {
+                    TxState::StartBit(trunc(time+1), to_tx)
+                }
+            },
+            TxState::Bit$(time, num_left, to_tx, odd_parity) => {
+                if time == trunc(config.bit_time - 1) {
+                    if num_left == 0 {
+                        if config.parity { 
+                            TxState::Parity(0, odd_parity)
+                        } else {
+                            TxState::StopBit(0, config.stop_bits)
+                        }
+                    }
+                    else {
+                        TxState::Bit$(
+                            time: 0,
+                            num_left: trunc(num_left - 1),
+                            to_tx: to_tx >> 1,
+                            odd_parity: odd_parity ^^ (((to_tx >> 1) & 1) == 1)
+                        )
+                    }
+                }
+                else {
+                    TxState::Bit$(
+                        time: trunc(time+1),
+                        num_left,
+                        to_tx,
+                        odd_parity
+                    )
+                }
+            },
+            TxState::Parity$(time, odd) => {
+                if time == trunc(config.bit_time - 1) {
+                    TxState::StopBit(0, config.stop_bits)
+                } else {
+                    TxState::Parity$(time: trunc(time + 1), odd)
+                }
+            },
+            TxState::StopBit$(time, count) => {
+                if time == trunc(config.bit_time - 1) {
+                    if count == 1 {
+                        TxState::Idle()
+                    } else {
+                        TxState::StopBit$(time, count: trunc(count - 1))
+                    }
+                }
+                else {
+                    TxState::StopBit$(time: trunc(time + 1), count)
+                }
+            }
+        }
+    };
+
+    match state {
+        TxState::Idle => TxOut$(tx: true, ready: true),
+        TxState::StartBit(_, _) => TxOut$(tx: false, ready: false),
+        TxState::Bit(_, _, to_tx, _) => TxOut$(tx: (to_tx & 1) == 1, ready: false),
+        TxState::Parity(_, odd) => TxOut$(tx: odd, ready: false),
+        TxState::StopBit(_, _) => TxOut$(tx: true, ready: false)
+    }
+}
+
+enum RxState {
+    Idle,
+    WaitStart{time: uint<15>},
+    ReadBit{time: uint<15>, mask_left: uint<7>, word: uint<8>},
+    WaitParity{time: uint<15>, word: uint<8>},
+    Done{word: uint<8>, parity: bool},
+    WaitStop{time: uint<15>, count: uint<3>}
+}
+
+enum UartOut {
+    Ok{val: uint<8>},
+    ParityError{val: uint<8>},
+    None
+}
+
+impl UartOut {
+    fn strip_parity(self) -> Option<uint<8>> {
+        match self {
+            UartOut::Ok(val) => Some(val),
+            UartOut::ParityError(val) => Some(val),
+            UartOut::None => None()
+        }
+    }
+}
+
+entity uart_rx(
+    clk: clock,
+    rst: bool,
+    rx: bool,
+    config: UartConfig
+) -> UartOut {
+    let msb_one: uint<9> = 0b1000_0000;
+    let new_bit = if rx {trunc(msb_one)} else {0};
+    reg(clk) state reset (rst: RxState::Idle()) = {
+        match state {
+            RxState::Idle => {
+                if !rx {
+                    RxState::WaitStart(0)
+                }
+                else {
+                    RxState::Idle()
+                }
+            },
+            RxState::WaitStart(time) => {
+                if time == trunc((config.bit_time - 1) + ((config.bit_time - 1) >> 1)) {
+                    RxState::ReadBit$(time: 0, mask_left: 0x7f, word: new_bit)
+                }
+                else {
+                    RxState::WaitStart(trunc(time+1))
+                }
+            },
+            RxState::ReadBit$(time, mask_left, word) => {
+                let new_word = (word >> 1) | new_bit;
+                if time == trunc(config.bit_time - 1) {
+                    if mask_left == 1 {
+                        if config.parity {
+                            RxState::WaitParity$(word: new_word, time: 0)
+                        } else {
+                            // Dummy parity value because it is not checked
+                            RxState::Done$(word: new_word, parity: true)
+                        }
+                    }
+                    else {
+                        RxState::ReadBit$(
+                            time: 0,
+                            mask_left: trunc(mask_left >> 1),
+                            word: new_word
+                        )
+                    }
+                }
+                else {
+                    RxState::ReadBit$(time: trunc(time+1), mask_left, word)
+                }
+            },
+            RxState::WaitParity$(time, word) => {
+                if time == trunc(config.bit_time - 1) {
+                    RxState::Done$(word, parity: rx)
+                }
+                else {
+                    RxState::WaitParity$(time: trunc(time+1), word)
+                }
+            },
+            RxState::Done(_, _) => RxState::WaitStop(0, config.stop_bits),
+            RxState::WaitStop(time, count) => if time >= config.bit_time {
+                if count == 1 {
+                    RxState::Idle()
+                }
+                else {
+                    RxState::WaitStop$(time: 0, count: trunc(count - 1))
+                }
+            }
+            else {
+                RxState::WaitStop$(time: trunc(time + 1), count)
+            }
+        }
+    };
+
+    match state {
+        RxState::Done$(word, parity) => {
+            // == aparently only works on integers, so we'll have to resort to not xor for comparison
+            if !config.parity || !(odd_parity(word) ^^ parity) {
+                UartOut::Ok(word)
+            }
+            else {
+                UartOut::ParityError(word)
+            }
+        },
+        _ => UartOut::None()
+    }
+}
+
+fn odd_parity(word: uint<8>) -> bool {
+    ((word & 1) == 1)
+        ^^ (((word >> 1) & 1) == 1)
+        ^^ (((word >> 2) & 1) == 1)
+        ^^ (((word >> 3) & 1) == 1)
+        ^^ (((word >> 4) & 1) == 1)
+        ^^ (((word >> 5) & 1) == 1)
+        ^^ (((word >> 6) & 1) == 1)
+        ^^ (((word >> 7) & 1) == 1)
+}
+

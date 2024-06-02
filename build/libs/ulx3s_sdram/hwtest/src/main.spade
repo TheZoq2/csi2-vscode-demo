@@ -1,0 +1,180 @@
+use std::io::rising_edge;
+use std::ports::read_mut_wire;
+
+use ulx3s_sdram::main::SdramPins;
+use ulx3s_sdram::main::SdramStatus;
+use ulx3s_sdram::main::Uart;
+use ulx3s_sdram::main::WishboneOutputs;
+
+use lib::generated::sdram_controller::sdram_controller;
+use lib::pll::SdramClocks;
+
+
+#[no_mangle]
+entity launder_clock(clk: clock) -> bool __builtin__
+
+#[no_mangle]
+entity main(
+    clk25: clock,
+    rst: bool,
+    uart: Uart,
+
+    user_button: bool,
+
+    sdram_a: &mut int<13>,
+    sdram_ba: &mut int<2>,
+    sdram_ras_n: &mut bool,
+    sdram_cas_n: &mut bool,
+    sdram_we_n: &mut bool,
+    sdram_cs_n: &mut bool,
+    sdram_dm: &mut int<2>,
+    sdram_dq: &int<16>,
+    sdram_cke: &mut bool,
+    sdram_clock: &mut bool,
+
+    led0: &mut bool,
+    led1: &mut bool,
+    led2: &mut bool,
+    led3: &mut bool,
+
+    gp: &mut [bool; 7]
+) -> SdramStatus {
+    let SdramClocks$(clk_50e6, clk_50e6_180deg) = inst lib::pll::pll$(clk25);
+    let clk = clk_50e6;
+
+    let (wishbone, avalon, status) = inst sdram_controller$(
+        clk_50e6: clk_50e6,
+        clk_50e6_180deg: clk_50e6_180deg,
+        rst,
+        uart,
+        pins: SdramPins$(
+            sdram_a,
+            sdram_ba,
+            sdram_ras_n,
+            sdram_cas_n,
+            sdram_we_n,
+            sdram_cs_n,
+            sdram_dm,
+            sdram_dq,
+            sdram_cke,
+            sdram_clock
+        )
+    );
+
+
+    reg(clk) button_sync = user_button;
+    let rising = inst rising_edge(clk, button_sync);
+
+    reg(clk) (debounce_timer, press): (int<32>, bool) reset (rst: (0, false)) =
+        match (debounce_timer, rising) {
+            (0, true) => (1_000_000, true),
+            (0, false) => (0, false),
+            (other, _) => (trunc(other - 1), false)
+        };
+
+    // reg(clk) count reset (rst: 1) = if press {trunc(count+1)} else {count};
+
+
+    let _ = wishbone
+        // .inst with_outputs(inst write_fsm(clk, rst, press, *wishbone.ack));
+        .inst unused();
+
+    let avalon_request = avalon.inst burst_writer(
+        clk,
+        rst,
+        if press { Some((10, 255)) } else { None() }
+    );
+    reg(clk) timer: uint<16> = if press {0} else { trunc(timer + 1) };
+    set avalon_request.value = zext(timer);
+    // let _ = wishbone.inst unused();
+
+    reg(clk) toggle reset (rst: false) = if press {!toggle} else {toggle};
+
+    set led0 = button_sync;
+    set led1 = toggle;
+    set led2 = user_button;
+    set led3 = inst read_mut_wire(wishbone.stb);
+
+    set gp = [
+        inst launder_clock(clk),
+        inst read_mut_wire(wishbone.cyc),
+        inst read_mut_wire(wishbone.stb),
+        *wishbone.ack,
+        *wishbone.err,
+        false,
+        false
+    ];
+
+    *status
+}
+
+
+enum WriteState {
+    WaitStart,
+    WaitAck {
+        duration: uint<16>,
+        num_left: uint<11>,
+        addr: uint<24>,
+        data: uint<16>
+    },
+    WriteDuration {
+        duration: uint<16>,
+    },
+}
+
+entity write_fsm(
+    clk: clock,
+    rst: bool,
+    start_write: bool,
+    wishbone_ack: bool,
+) -> WishboneOutputs {
+    reg(clk) state reset(rst: WriteState::WaitStart()) = match (state, wishbone_ack, start_write) {
+        (WriteState::WaitStart, _, false) => (WriteState::WaitStart()),
+        (WriteState::WaitStart, _, true) => WriteState::WaitAck$(
+            duration: 0,
+            num_left: 1023,
+            addr: 10,
+            data: 15
+        ),
+        (WriteState::WaitAck$(duration, num_left, addr, data), false, _) => {
+            WriteState::WaitAck$(duration: trunc(duration+1), num_left, addr, data)
+        },
+        (WriteState::WaitAck$(duration, num_left: 0, addr, data), true, _) => {
+            WriteState::WriteDuration$(duration)
+        },
+        (WriteState::WaitAck$(duration, num_left, addr, data), true, _) => {
+            WriteState::WaitAck$(
+                duration: trunc(duration + 1),
+                num_left: trunc(num_left - 1),
+                addr: trunc(addr + 1),
+                data: trunc(data + 1)
+            )
+        },
+        (WriteState::WriteDuration$(duration), false, _) => state,
+        (WriteState::WriteDuration$(duration), true, _) => WriteState::WaitStart,
+    };
+
+    match state {
+        WriteState::WaitStart => WishboneOutputs$(
+            addr: 0,
+            write: None(),
+            sel: 0,
+            cyc: false,
+            stb: false,
+        ),
+        WriteState::WaitAck$(duration: _, num_left: _, addr, data) => WishboneOutputs$(
+            addr: addr,
+            write: Some(data),
+            sel: 0b11U,
+            cyc: true,
+            stb: true,
+        ),
+        WriteState::WriteDuration$(duration) => WishboneOutputs$(
+            addr: 0,
+            write: Some(duration),
+            sel: 0b11U,
+            cyc: true,
+            stb: true,
+        ),
+    }
+}

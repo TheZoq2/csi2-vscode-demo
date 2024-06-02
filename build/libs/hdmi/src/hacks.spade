@@ -1,0 +1,2 @@
+#[no_mangle]
+entity unlaunder_clock(clk: clock) -> bool __builtin__

@@ -1,0 +1,46 @@
+name = "hwtest"
+
+extra_verilog = [
+    "build/libs/hdmi/src/example_verilog/tmds_encoder.v",
+]
+
+[libraries]
+hdmi = {git = "https://gitlab.com/TheZoq2/ulx3s_hdmi_spade", branch = "main"}
+csi2 = {git = "https://gitlab.com/TheZoq2/spade-csi2", branch = "pre_mem_rewrite"}
+ulx3s_sdram = {git = "https://gitlab.com/TheZoq2/spade-ulx3s-sdram", branch = "main"}
+ecp5stubs = {git = "https://gitlab.com/spade-lang/lib/ecp5stubs", branch = "main"}
+# scdbg = {path = "./deps/scdb"}
+
+# [plugins]
+# sdram = {path = "./deps/spade-ulx3s-sdram"}
+# hdmi_visualizer = {path = "hdmi_visualizer"}
+
+## NOTE: Syntehsis is done by .vscode/settings.json, this is ignored
+[synthesis]
+command = "synth_ecp5"
+top = "main"
+extra_verilog = [
+    "src/camera_pll.sv",
+    "src/dram_pll.sv",
+    "build/litedram/gateware/sdram_controller_impl.v",
+    "build/litex/pythondata-cpu-vexriscv/pythondata_cpu_vexriscv/verilog/VexRiscv.v",
+    "build/libs/hdmi/src/plls.sv",
+    "build/libs/hdmi/src/example_verilog/fake_differential.v",
+    "build/libs/hdmi/src/example_verilog/vga2dvid.v",
+
+    "./deps/ecp5stubs/src/wrappers.sv",
+    "./deps/ecp5stubs/src/ecp5pll.sv",
+]
+
+[pnr]
+architecture = "ecp5"
+device = "LFE5U-85F"
+pin_file = "ulx3s_v20.lpf"
+package = "CABGA381"
+pre_place = "pre_place.py"
+
+[upload]
+tool = "fujprog"
+
+[packing]
+tool = "ecppack"

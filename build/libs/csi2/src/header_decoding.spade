@@ -1,0 +1,185 @@
+use lib::short_packet::ShortPacket;
+use lib::short_packet::ShortPacketStream;
+use lib::lane_merger::MergedStream;
+
+struct PacketHeader {
+    id: uint<8>,
+    count: uint<16>,
+    ecc: uint<8>,
+}
+
+struct HeaderStream {
+    s: Option<PacketHeader>,
+}
+
+impl HeaderStream {
+    fn only_channel(self, channel: uint<2>) -> HeaderStream {
+        HeaderStream$(
+            s: match self.s {
+                Some(h) => {
+                    if (h.id & 0b1100_0000) == (zext(channel) << 6) {
+                        Some(h)
+                    } else {
+                        None()
+                    }
+                },
+                None => {
+                    None()
+                }
+            }
+        )
+    }
+
+    fn has_value(self) -> bool {
+        match self.s {
+            Some(_) => true,
+            None => false,
+        }
+    }
+
+    fn into_short_packets(self) -> ShortPacketStream {
+        let inner = match self.s {
+            Some(PacketHeader$(id, count: _, ecc: _)) => {
+                match id {
+                    0x00 => Some(ShortPacket::FrameStart()),
+                    0x01 => Some(ShortPacket::FrameEnd()),
+                    _ => if (id & 0x30) == 0 {
+                        Some(ShortPacket::Other())
+                    } else {
+                        None()
+                    }
+                }
+            },
+            None() => None()
+        };
+        ShortPacketStream(inner)
+    }
+
+    fn only_id(self, id: uint<6>) -> LongHeaderStream {
+        LongHeaderStream$(
+            s: match self.s {
+                Some(h) => {
+                    if trunc(h.id) == id {
+                        Some(h)
+                    } else {
+                        None()
+                    }
+                },
+                None => {
+                    None()
+                }
+            }
+        )
+    }
+}
+
+struct LongHeaderStream {
+    s: Option<PacketHeader>
+}
+
+impl LongHeaderStream {
+    fn is_start(self) -> bool {
+        match self.s {
+            Some(_) => true,
+            None => false
+        }
+    }
+
+    entity into_pixel_stream(
+        self,
+        sys_clk: clock,
+        rst: bool,
+        merged: MergedStream
+    ) -> PixelStream {
+        reg(sys_clk) bytes_left reset(rst: 0) = match self.s {
+            Some(PacketHeader$(id, count, ecc: _)) => {
+                // Since we get 2 bytes per tick, we'll divide the expected number of
+                // counts by 1
+                count >> 1
+            },
+            None => match merged.s {
+                Some(_) => if bytes_left == 0 {0} else {trunc(bytes_left - 1)},
+                // If we lost alignment, break out
+                None => 0
+            }
+        };
+
+        let wrong_count = bytes_left > 0 && match merged.s {Some(_) => false, None => true};
+
+        let s = if bytes_left > 0 {
+            merged.s
+        } else {
+            None()
+        };
+
+        PixelStream$(
+            s,
+        )
+    }
+}
+
+struct PixelStream {
+    s: Option<(uint<8>, uint<8>)>,
+}
+
+
+enum DecoderState {
+    WaitPacket,
+    WaitPart2{id: uint<8>, count_lsb: uint<8>},
+}
+
+impl MergedStream {
+    entity into_packet_headers(
+        self,
+        sys_clk: clock,
+        rst: bool,
+        ecc_corrected: &mut bool,
+        ecc_error: &mut bool,
+    ) -> HeaderStream {
+        let now_aligned = match self.s {Some(_) => true, None => false};
+        reg(sys_clk) prev_aligned = now_aligned;
+        let just_aligned = now_aligned && !prev_aligned;
+
+        reg(sys_clk) state reset(rst: DecoderState::WaitPacket()) = {
+            match self.s {
+                Some((lsb, msb)) => {
+                    match state {
+                        DecoderState::WaitPacket => {
+                            if just_aligned {
+                                DecoderState::WaitPart2$(id: lsb, count_lsb: msb)
+                            }
+                            else {
+                                state
+                            }
+                        },
+                        DecoderState::WaitPart2$(id, count_lsb) => {
+                            DecoderState::WaitPacket()
+                        },
+                    }
+                },
+                None => DecoderState::WaitPacket(),
+            }
+        };
+
+        let (packet, ecc_corr, ecc_err) = match (state, self.s) {
+            (DecoderState::WaitPart2$(id, count_lsb), Some((count_msb, ecc))) => {
+                let corrected = lib::ecc::apply_header_ecc([id, count_lsb, count_msb], ecc);
+                (
+                    Some(PacketHeader$(
+                        id: corrected.data[0],
+                        count: corrected.data[2] `concat` corrected.data[1],
+                        ecc: ecc
+                    )),
+                    corrected.applied_correction,
+                    corrected.error
+                )
+            },
+            (_, _) => (None(), false, false)
+        };
+
+        set ecc_corrected = ecc_corr;
+        set ecc_error = ecc_err;
+
+        HeaderStream(packet)
+    }
+}

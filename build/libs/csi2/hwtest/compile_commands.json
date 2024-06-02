@@ -1,0 +1,40 @@
+[
+  {
+    "arguments": [
+      "/usr/bin/g++",
+      "-I.",
+      "-I/usr/share/verilator/include",
+      "-I/usr/share/verilator/include/vltstd",
+      "-DVM_COVERAGE=0",
+      "-DVM_SC=0",
+      "-DVM_TRACE=1",
+      "-DVM_TRACE_FST=0",
+      "-DVM_TRACE_VCD=1",
+      "-faligned-new",
+      "-fcf-protection=none",
+      "-Wno-bool-operation",
+      "-Wno-shadow",
+      "-Wno-sign-compare",
+      "-Wno-tautological-compare",
+      "-Wno-uninitialized",
+      "-Wno-unused-but-set-parameter",
+      "-Wno-unused-but-set-variable",
+      "-Wno-unused-parameter",
+      "-Wno-unused-variable",
+      "-I/home/frans/Documents/spade/camera_playground/hwtest/build",
+      "-fdiagnostics-color=always",
+      "-g",
+      "-std=c++20",
+      "-I/home/frans/Documents/spade/camera_playground/hwtest/../spade/target/cxxbridge/spade-cxx/src",
+      "-I/home/frans/Documents/spade/camera_playground/hwtest/hdmi_visualizer/target/cxxbridge/hdmi_visualizer/src/",
+      "-Os",
+      "-c",
+      "-o",
+      "hdmi_visualizer.o",
+      "/home/frans/Documents/spade/camera_playground/hwtest/test/hdmi_visualizer.cpp"
+    ],
+    "directory": "/home/frans/Documents/spade/camera_playground/hwtest/build/hdmi_visualizer_it_works/obj_dir",
+    "file": "/home/frans/Documents/spade/camera_playground/hwtest/test/hdmi_visualizer.cpp",
+    "output": "/home/frans/Documents/spade/camera_playground/hwtest/build/hdmi_visualizer_it_works/obj_dir/hdmi_visualizer.o"
+  }
+]

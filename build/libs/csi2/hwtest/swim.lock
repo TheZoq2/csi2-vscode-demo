@@ -1,0 +1,8 @@
+[libraries.hdmi]
+commit = "9902e4f1ccc02a236344850be50f68fd992981a6"
+
+[libraries.vga]
+commit = "03340269b65e177b1ca4acfbe6316bccf3b9a099"
+
+[spade]
+commit = "958d8ed1f31c65a8a3a37015b52e72872b9ba517"

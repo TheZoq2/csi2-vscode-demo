@@ -1,0 +1,17 @@
+use lib::uart::UartConfig;
+use lib::uart::UartOut;
+use lib::uart::uart_rx;
+use lib::uart::uart_tx;
+
+entity uart_loopback(clk: clock, rst: bool, config: UartConfig, to_transmit: Option<uint<8>>)
+    -> UartOut
+{
+    let tx_out = inst uart_tx(clk, rst, to_transmit, config);
+    let rx_out = inst uart_rx(clk, rst, tx_out.tx, config);
+
+    reg(clk) last_received reset(rst: UartOut::None()) = match rx_out {
+        UartOut::None => last_received,
+        other => rx_out
+    };
+    last_received
+}

@@ -1,0 +1,173 @@
+use ulx3s_sdram::main::Uart;
+use ulx3s_sdram::main::DramWishbone;
+use ulx3s_sdram::main::SdramStatus;
+use ulx3s_sdram::main::SdramPins;
+use ulx3s_sdram::axi::AxiPort;
+use ulx3s_sdram::avalon::AvalonPort;
+
+use ecp5stubs::ecp5stubs::oddrx1f;
+
+use std::ports::new_mut_wire;
+use std::ports::read_mut_wire;
+
+
+#[no_mangle]
+entity sdram_controller_impl(
+    #[no_mangle] clk: clock,
+    #[no_mangle] init_done: &mut bool,
+    #[no_mangle] init_error: &mut bool,
+    #[no_mangle] rst: bool,
+    #[no_mangle] sdram_a: &mut int<13>,
+    #[no_mangle] sdram_ba: &mut int<2>,
+    #[no_mangle] sdram_cas_n: &mut bool,
+    #[no_mangle] sdram_cke: &mut bool,
+    #[no_mangle] sdram_cs_n: &mut bool,
+    #[no_mangle] sdram_dm: &mut int<2>,
+    #[no_mangle] sdram_dq: int<16>,
+    #[no_mangle] sdram_ras_n: &mut bool,
+    #[no_mangle] sdram_we_n: &mut bool,
+    #[no_mangle] uart_rx: bool,
+    #[no_mangle] uart_tx: &mut bool,
+    #[no_mangle] user_port_avalon_0_address: uint<24>,
+    #[no_mangle] user_port_avalon_0_burstcount: uint<8>,
+    #[no_mangle] user_port_avalon_0_byteenable: uint<2>,
+    #[no_mangle] user_port_avalon_0_read: bool,
+    #[no_mangle] user_port_avalon_0_readdata: &mut uint<16>,
+    #[no_mangle] user_port_avalon_0_readdatavalid: &mut bool,
+    #[no_mangle] user_port_avalon_0_waitrequest: &mut bool,
+    #[no_mangle] user_port_avalon_0_write: bool,
+    #[no_mangle] user_port_avalon_0_writedata: uint<16>, #[no_mangle] user_port_avalon_1_address: uint<24>,
+    #[no_mangle] user_port_avalon_1_burstcount: uint<8>,
+    #[no_mangle] user_port_avalon_1_byteenable: uint<2>,
+    #[no_mangle] user_port_avalon_1_read: bool,
+    #[no_mangle] user_port_avalon_1_readdata: &mut uint<16>,
+    #[no_mangle] user_port_avalon_1_readdatavalid: &mut bool,
+    #[no_mangle] user_port_avalon_1_waitrequest: &mut bool,
+    #[no_mangle] user_port_avalon_1_write: bool,
+    #[no_mangle] user_port_avalon_1_writedata: uint<16>, #[no_mangle] user_port_avalon_2_address: uint<24>,
+    #[no_mangle] user_port_avalon_2_burstcount: uint<8>,
+    #[no_mangle] user_port_avalon_2_byteenable: uint<2>,
+    #[no_mangle] user_port_avalon_2_read: bool,
+    #[no_mangle] user_port_avalon_2_readdata: &mut uint<16>,
+    #[no_mangle] user_port_avalon_2_readdatavalid: &mut bool,
+    #[no_mangle] user_port_avalon_2_waitrequest: &mut bool,
+    #[no_mangle] user_port_avalon_2_write: bool,
+    #[no_mangle] user_port_avalon_2_writedata: uint<16>, #[no_mangle] user_port_avalon_3_address: uint<24>,
+    #[no_mangle] user_port_avalon_3_burstcount: uint<8>,
+    #[no_mangle] user_port_avalon_3_byteenable: uint<2>,
+    #[no_mangle] user_port_avalon_3_read: bool,
+    #[no_mangle] user_port_avalon_3_readdata: &mut uint<16>,
+    #[no_mangle] user_port_avalon_3_readdatavalid: &mut bool,
+    #[no_mangle] user_port_avalon_3_waitrequest: &mut bool,
+    #[no_mangle] user_port_avalon_3_write: bool,
+    #[no_mangle] user_port_avalon_3_writedata: uint<16>, #[no_mangle] user_port_avalon_4_address: uint<24>,
+    #[no_mangle] user_port_avalon_4_burstcount: uint<8>,
+    #[no_mangle] user_port_avalon_4_byteenable: uint<2>,
+    #[no_mangle] user_port_avalon_4_read: bool,
+    #[no_mangle] user_port_avalon_4_readdata: &mut uint<16>,
+    #[no_mangle] user_port_avalon_4_readdatavalid: &mut bool,
+    #[no_mangle] user_port_avalon_4_waitrequest: &mut bool,
+    #[no_mangle] user_port_avalon_4_write: bool,
+    #[no_mangle] user_port_avalon_4_writedata: uint<16>,
+    #[no_mangle] user_clk: &mut bool,
+    #[no_mangle] user_rst: &mut bool,
+) __builtin__
+
+entity sdram_controller(
+    clk_50e6: clock,
+clk_50e6_180deg: clock,
+    rst: bool,
+    uart: Uart,
+    pins: SdramPins
+) -> (AvalonPort, AvalonPort, AvalonPort, AvalonPort, AvalonPort, &SdramStatus) {
+    let init_done = inst new_mut_wire();
+    let init_error = inst new_mut_wire();
+
+    let (avalon_0, avalon_0_inv) = port;
+let (avalon_1, avalon_1_inv) = port;
+let (avalon_2, avalon_2_inv) = port;
+let (avalon_3, avalon_3_inv) = port;
+let (avalon_4, avalon_4_inv) = port;
+
+    let _ = inst sdram_controller_impl$(
+        clk: clk_50e6,
+        rst,
+
+        uart_tx: uart.tx,
+        uart_rx: *uart.rx,
+
+        sdram_a: pins.sdram_a,
+        sdram_ba: pins.sdram_ba,
+        sdram_ras_n: pins.sdram_ras_n,
+        sdram_cas_n: pins.sdram_cas_n,
+        sdram_we_n: pins.sdram_we_n,
+        sdram_cs_n: pins.sdram_cs_n,
+        sdram_dm: pins.sdram_dm,
+        sdram_dq: *pins.sdram_dq,
+        sdram_cke: pins.sdram_cke,
+
+        init_done,
+        init_error,
+
+        user_port_avalon_0_address: *avalon_0_inv.address,
+        user_port_avalon_0_burstcount: *avalon_0_inv.burstcount,
+        user_port_avalon_0_byteenable: *avalon_0_inv.byteenable,
+        user_port_avalon_0_read: *avalon_0_inv.read,
+        user_port_avalon_0_readdata: avalon_0_inv.readdata,
+        user_port_avalon_0_readdatavalid: avalon_0_inv.readdatavalid,
+        user_port_avalon_0_waitrequest: avalon_0_inv.waitrequest,
+        user_port_avalon_0_write: *avalon_0_inv.write,
+        user_port_avalon_0_writedata: *avalon_0_inv.writedata,
+user_port_avalon_1_address: *avalon_1_inv.address,
+        user_port_avalon_1_burstcount: *avalon_1_inv.burstcount,
+        user_port_avalon_1_byteenable: *avalon_1_inv.byteenable,
+        user_port_avalon_1_read: *avalon_1_inv.read,
+        user_port_avalon_1_readdata: avalon_1_inv.readdata,
+        user_port_avalon_1_readdatavalid: avalon_1_inv.readdatavalid,
+        user_port_avalon_1_waitrequest: avalon_1_inv.waitrequest,
+        user_port_avalon_1_write: *avalon_1_inv.write,
+        user_port_avalon_1_writedata: *avalon_1_inv.writedata,
+user_port_avalon_2_address: *avalon_2_inv.address,
+        user_port_avalon_2_burstcount: *avalon_2_inv.burstcount,
+        user_port_avalon_2_byteenable: *avalon_2_inv.byteenable,
+        user_port_avalon_2_read: *avalon_2_inv.read,
+        user_port_avalon_2_readdata: avalon_2_inv.readdata,
+        user_port_avalon_2_readdatavalid: avalon_2_inv.readdatavalid,
+        user_port_avalon_2_waitrequest: avalon_2_inv.waitrequest,
+        user_port_avalon_2_write: *avalon_2_inv.write,
+        user_port_avalon_2_writedata: *avalon_2_inv.writedata,
+user_port_avalon_3_address: *avalon_3_inv.address,
+        user_port_avalon_3_burstcount: *avalon_3_inv.burstcount,
+        user_port_avalon_3_byteenable: *avalon_3_inv.byteenable,
+        user_port_avalon_3_read: *avalon_3_inv.read,
+        user_port_avalon_3_readdata: avalon_3_inv.readdata,
+        user_port_avalon_3_readdatavalid: avalon_3_inv.readdatavalid,
+        user_port_avalon_3_waitrequest: avalon_3_inv.waitrequest,
+        user_port_avalon_3_write: *avalon_3_inv.write,
+        user_port_avalon_3_writedata: *avalon_3_inv.writedata,
+user_port_avalon_4_address: *avalon_4_inv.address,
+        user_port_avalon_4_burstcount: *avalon_4_inv.burstcount,
+        user_port_avalon_4_byteenable: *avalon_4_inv.byteenable,
+        user_port_avalon_4_read: *avalon_4_inv.read,
+        user_port_avalon_4_readdata: avalon_4_inv.readdata,
+        user_port_avalon_4_readdatavalid: avalon_4_inv.readdatavalid,
+        user_port_avalon_4_waitrequest: avalon_4_inv.waitrequest,
+        user_port_avalon_4_write: *avalon_4_inv.write,
+        user_port_avalon_4_writedata: *avalon_4_inv.writedata,
+
+        // NOTE: This port has no use to us, but is generated by litedram
+        user_rst: inst new_mut_wire(),
+        user_clk: inst new_mut_wire()
+    );
+
+
+    set pins.sdram_clock = inst oddrx1f$(d: 0b01, rst, sclk: clk_50e6_180deg);
+
+    let status = SdramStatus$(
+        init_done: inst read_mut_wire(init_done),
+        init_error: inst read_mut_wire(init_error),
+    );
+
+    (avalon_0, avalon_1, avalon_2, avalon_3, avalon_4, &status)
+}
+

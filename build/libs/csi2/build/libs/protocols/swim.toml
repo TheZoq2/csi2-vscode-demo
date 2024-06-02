@@ -1,0 +1,5 @@
+name = "protocols"
+
+[simulation]
+testbench_dir = "test"
+python_deps = ["pytest"]
