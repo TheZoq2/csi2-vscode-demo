@@ -1,1 +1,0 @@
-verilator --lint-only lint.vlt build/spade.sv src/**.sv --top main  deps/ulx3s_hdmi_spade/src/plls.sv  sdram_controller_stup.v /usr/share/yosys/ecp5/cells_bb.v  yosys_stubs.v deps/ulx3s_hdmi_spade/src/example_verilog/tmds_encoder.v  ./build/litex/pythondata-cpu-vexriscv/pythondata_cpu_vexriscv/verilog/VexRiscv.v

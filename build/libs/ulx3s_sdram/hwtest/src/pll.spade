@@ -1,9 +1,0 @@
-struct port SdramClocks {
-    clk_50e6: clock,
-    clk_50e6_180deg: clock
-}
-
-#[no_mangle]
-entity pll(
-    #[no_mangle] clk25: clock,
-) -> SdramClocks __builtin__ 

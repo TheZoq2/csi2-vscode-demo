@@ -1,4 +1,0 @@
-build_commands = [
-  "cd ${PLUGIN_DIR} && cargo build --release",
-  "cd ${PLUGIN_DIR} && clang++ -c -o target/hdmi_visualizer.o target/cxxbridge/hdmi_visualizer/src/lib.rs.cc"
-]

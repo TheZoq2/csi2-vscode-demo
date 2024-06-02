@@ -6,7 +6,7 @@ extra_verilog = [
 
 [libraries]
 hdmi = {git = "https://gitlab.com/TheZoq2/ulx3s_hdmi_spade", branch = "main"}
-csi2 = {git = "https://gitlab.com/TheZoq2/spade-csi2", branch = "pre_mem_rewrite"}
+csi2 = {git = "https://gitlab.com/TheZoq2/spade-csi2", branch = "main"}
 ulx3s_sdram = {git = "https://gitlab.com/TheZoq2/spade-ulx3s-sdram", branch = "main"}
 ecp5stubs = {git = "https://gitlab.com/spade-lang/lib/ecp5stubs", branch = "main"}
 # scdbg = {path = "./deps/scdb"}

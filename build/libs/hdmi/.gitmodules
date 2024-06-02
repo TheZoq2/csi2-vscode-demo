@@ -1,3 +1,0 @@
-[submodule "deps/vga_spade"]
-	path = deps/vga_spade
-	url = https://gitlab.com/TheZoq2/vga_spade.git

@@ -1,4 +1,0 @@
-(fp_lib_table
-  (version 7)
-  (lib (name "connector_footprint")(type "KiCad")(uri "${KIPRJMOD}/connector_footprint")(options "")(descr ""))
-)
