@@ -1,0 +1,7 @@
+{
+    "recommendations": [
+        "yowasp.toolchain",
+        "spade-lang.spade-syntax",
+        "tamasfe.even-better-toml"
+    ]
+}

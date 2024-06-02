@@ -1,0 +1,18 @@
+{
+  "yowaspToolchain.buildCommands": [
+    ["swimPrepare"],
+    ["swim", "build"],
+    ["spade", "--command-file", "build/commands.json", "/dev/null", "-o", "/dev/null"],
+    ["yosys", "build/spade.sv", "build/libs/hdmi/src/ecp5pll.sv", "build/libs/hdmi/src/plls.sv", "build/libs/hdmi/src/example_verilog/tmds_encoder.v", "-o", "build/top.json", "-p", "synth_ecp5", "-r", "top"],
+    ["nextpnr-ecp5", "--85k", "--package", "CABGA381", "--json", "build/top.json", "--lpf", "top.lpf", "--textcfg", "build/top.config"],
+    ["ecppack", "--compress", "build/top.config", "top.bit"],
+    ["openFPGALoader", "-b", "ulx3s", "-m", "top.bit"]
+  ],
+  "yowaspToolchain.bundles": [
+    "@yowasp/yosys@release",
+    "@yowasp/nextpnr-ecp5",
+    "@spade-lang/spade@0.9.0-dev943.733.2aa6ac-bc3d06",
+    "@spade-lang/swim@0.8.0-dev233.754.200c83-7d4d30",
+    "@yowasp/openfpgaloader",
+  ]
+}
